@@ -1,0 +1,79 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+file.c: libctru paths are "device:/..." (sdmc:/, romfs:/). Treat such a prefix like a DOS
+drive letter: absolute in rb_is_absolute_path, skipped by skiproot, kept by expand_path.
+Before: File.expand_path("sdmc:/x") == "#{Dir.pwd}/sdmc:/x".
+File.dirname keeps the device ("sdmc:/a/b" -> "sdmc:/a", not "/a").
+
+--- a/file.c
++++ b/file.c
+@@ -3408,12 +3408,28 @@
+ #endif
+ #endif
+ 
++#ifdef __3DS__
++/* Nintendo 3DS (libctru): paths are "device:/..." (sdmc:/, romfs:/). Returns the length of a
++ * leading "name:" (letters/digits) when followed by '/', else 0; treated like a drive letter. */
++static size_t
++rb3ds_device_len(const char *path, const char *end)
++{
++    const char *p = path;
++    while (p < end && ISALNUM(*p)) p++;
++    if (p == path || p + 1 >= end || p[0] != ':' || p[1] != '/') return 0;
++    return (size_t)(p + 1 - path);
++}
++#endif
++
+ static inline char *
+ skiproot(const char *path, const char *end, rb_encoding *enc)
+ {
+ #ifdef DOSISH_DRIVE_LETTER
+     if (path + 2 <= end && has_drive_letter(path)) path += 2;
+ #endif
++#ifdef __3DS__
++    path += rb3ds_device_len(path, end);
++#endif
+     while (path < end && isdirsep(*path)) path++;
+     return (char *)path;
+ }
+@@ -3826,6 +3842,17 @@
+ 	}
+     }
+ #endif
++#ifdef __3DS__
++    /* "sdmc:/..." and other devices: keep the device, expand the rest as an absolute path */
++    else if (rb3ds_device_len(s, fend)) {
++	size_t dlen = rb3ds_device_len(s, fend);
++	BUFCHECK(bdiff + dlen >= buflen);
++	memcpy(p, s, dlen);
++	p += dlen;
++	s += dlen;
++	rb_enc_copy(result, fname);
++    }
++#endif
+     else if (!rb_is_absolute_path(s)) {
+ 	if (!NIL_P(dname)) {
+ 	    rb_file_expand_path_internal(dname, Qnil, abs_mode, long_name, result);
+@@ -4806,7 +4833,12 @@
+     if (root > name + 1 && isdirsep(*name))
+ 	root = skipprefix(name = root - 2, end, enc);
+ #else
+-    if (root > name + 1)
++    if (root > name + 1
++#ifdef __3DS__
++	/* keep "sdmc:/" in front: collapsing to root - 1 would drop the device */
++	&& !rb3ds_device_len(name, end)
++#endif
++	)
+ 	name = root - 1;
+ #endif
+     if (n > (end - root + 1) / 2) {
+@@ -6278,6 +6310,9 @@
+ #ifndef DOSISH
+     if (path[0] == '/') return 1;
+ #endif
++#ifdef __3DS__
++    if (rb3ds_device_len(path, path + strlen(path))) return 1;
++#endif
+     return 0;
+ }
+ 

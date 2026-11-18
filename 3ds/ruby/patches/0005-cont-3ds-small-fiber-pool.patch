@@ -1,0 +1,23 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+cont.c: on the Nintendo 3DS the fiber pool's stacks are zeroed heap memory (no lazy commit):
+start with 2 fiber stacks instead of 8 (~0.65 MB instead of ~2.6 MB at boot). 1 does not work:
+fiber_pool_allocate_memory only allocates while count > 1.
+
+--- a/cont.c
++++ b/cont.c
+@@ -54,7 +54,14 @@
+ #define CAPTURE_JUST_VALID_VM_STACK 1
+ 
+ // Defined in `coroutine/$arch/Context.h`:
+-#ifdef COROUTINE_LIMITED_ADDRESS_SPACE
++#if defined(__3DS__)
++/* Nintendo 3DS: no lazy commit, the pool's stacks are zeroed heap memory (~320 KiB each);
++ * 2 instead of 8 up front (fiber_pool_allocate_memory allocates only while count > 1, so 2 is
++ * the minimum). RGSS games rarely use Fibers. */
++#define FIBER_POOL_ALLOCATION_FREE
++#define FIBER_POOL_INITIAL_SIZE 2
++#define FIBER_POOL_ALLOCATION_MAXIMUM_SIZE 32
++#elif defined(COROUTINE_LIMITED_ADDRESS_SPACE)
+ #define FIBER_POOL_ALLOCATION_FREE
+ #define FIBER_POOL_INITIAL_SIZE 8
+ #define FIBER_POOL_ALLOCATION_MAXIMUM_SIZE 32

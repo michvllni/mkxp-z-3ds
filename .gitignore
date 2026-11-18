@@ -76,3 +76,6 @@ DerivedData/
 
 ## Gcc Patch
 /*.gcno
+
+# Nintendo 3DS build output (3ds/ruby/build.sh)
+/build-3ds

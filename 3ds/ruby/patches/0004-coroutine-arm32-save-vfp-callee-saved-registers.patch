@@ -1,0 +1,45 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+coroutine/arm32: save d8-d15 in coroutine_transfer under the hard-float AAPCS
+(__ARM_PCS_VFP), where they are callee-saved. Without it a Fiber switch corrupts
+floating-point values the caller keeps in d8-d15 (verified with a register-level test in
+rmxp3ds tools/bench). Context.h reserves the 16 extra words in the initial frame.
+The assembler needs the FPU (-mfpu=vfp) in ASFLAGS, see 3ds/ruby/build.sh.
+
+--- a/coroutine/arm32/Context.S
++++ b/coroutine/arm32/Context.S
+@@ -18,6 +18,10 @@
+ PREFIXED_SYMBOL(SYMBOL_PREFIX,coroutine_transfer):
+ 	# Save caller state (8 registers + return address)
+ 	push {r4-r11,lr}
++#if defined(__ARM_PCS_VFP)
++	# Hard-float AAPCS: d8-d15 are callee-saved as well
++	vpush {d8-d15}
++#endif
+ 
+ 	# Save caller stack pointer
+ 	str sp, [r0]
+@@ -25,6 +29,9 @@
+ 	# Restore callee stack pointer
+ 	ldr sp, [r1]
+ 
++#if defined(__ARM_PCS_VFP)
++	vpop {d8-d15}
++#endif
+ 	# Restore callee state (8 registers program counter)
+ 	pop {r4-r11,pc}
+ 
+--- a/coroutine/arm32/Context.h
++++ b/coroutine/arm32/Context.h
+@@ -18,7 +18,12 @@
+ #define COROUTINE __attribute__((noreturn)) void
+ #define COROUTINE_LIMITED_ADDRESS_SPACE
+ 
++#if defined(__ARM_PCS_VFP)
++/* r4-r11, then d8-d15 (16 words) below them: callee-saved under the hard-float AAPCS */
++enum {COROUTINE_REGISTERS = 8 + 16};
++#else
+ enum {COROUTINE_REGISTERS = 8};
++#endif
+ 
+ struct coroutine_context
+ {
