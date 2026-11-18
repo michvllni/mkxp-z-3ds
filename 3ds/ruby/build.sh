@@ -10,9 +10,11 @@
 #   with `meson subprojects download`), plus the 3DS patches in 3ds/ruby/patches/ and the POSIX
 #   shim in 3ds/ruby/shim/. The meson-managed tree under subprojects/ is never modified: it is
 #   copied to DIR/src and patched there.
-#   Output in DIR/build: libruby-static.a, encinit/extinit and extension archives, headers
-#   (include/ and .ext/include/), and DIR/shim/librb3dsshim.a. Configure output: DIR/build/
-#   config.log. Needs DEVKITPRO and a host Ruby of the same version as baseruby on PATH.
+#   Output: DIR/build (libruby-static.a, encinit/extinit and extension archives, config headers
+#   in .ext/include/arm-eabi), DIR/src/include (Ruby headers), DIR/shim/librb3dsshim.a, and
+#   3ds/ruby/shim/include/rb3ds.h for embedders. Configure output: DIR/configure.out and
+#   DIR/build/config.log. Needs DEVKITPRO, meson and a host Ruby of the same version as
+#   baseruby on PATH.
 #
 # OPTIONS
 #   --build-dir DIR   build directory (default: build-3ds/ruby in the repository root)
@@ -37,7 +39,7 @@ CLEAN=0
 TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
-    --build-dir) BUILD="${2:?--build-dir needs a value}"; shift 2 ;;
+    --build-dir) BUILD="$(realpath -m "${2:?--build-dir needs a value}")"; shift 2 ;;
     --jobs) JOBS="${2:?--jobs needs a value}"; shift 2 ;;
     --clean) CLEAN=1; shift ;;
     --target) TARGET="${2:?--target needs a value}"; shift 2 ;;
@@ -67,9 +69,17 @@ fi
 [ "$CLEAN" -eq 0 ] || rm -rf "$BUILD"
 mkdir -p "$BUILD"
 
-# 1. Source: meson unpacks and patches exactly like the desktop build.
-if [ ! -f "$REPO/subprojects/$RUBY_DIR/configure" ]; then
+# 1. Source: meson unpacks and patches exactly like the desktop build. meson never updates an
+# unpacked tree, so it is unpacked again when the wrap or mkxp-z's packagefiles change.
+UPSTREAM_ID="$( (cat "$REPO/subprojects/ruby-3.1.wrap"; cd "$REPO/subprojects/packagefiles" &&
+  find ruby-3.1 -type f -print0 | sort -z | xargs -0 sha256sum) | sha256sum | cut -d' ' -f1)"
+if [ ! -f "$REPO/subprojects/$RUBY_DIR/configure" ] \
+   || [ "$(cat "$BUILD/.rb3ds-upstream" 2>/dev/null || true)" != "$UPSTREAM_ID" ]; then
+  rm -rf "${REPO:?}/subprojects/$RUBY_DIR"
   (cd "$REPO" && meson subprojects download ruby-3.1)
+  mkdir -p "$BUILD"
+  echo "$UPSTREAM_ID" >"$BUILD/.rb3ds-upstream"
+  rm -rf "$BUILD/src" "$BUILD/build"
 fi
 
 # 2. Private copy + 3DS patches; redone when the patch set or the wrap changes.
@@ -97,10 +107,12 @@ arm-none-eabi-ar rcs "$BUILD/shim/librb3dsshim.a" "$BUILD/shim/rb3ds_shim.o"
 # 4. Configure (again whenever its arguments change).
 # -std=gnu17: Ruby 3.1 predates C23 (GCC >= 15 default), whose `()` == `(void)` breaks its
 # function-pointer casts. TRANSIENT_HEAP_TOTAL_SIZE: 4 MiB instead of 32 MiB allocated up front.
+# USE_THREAD_CACHE=0: a reused native thread skips native_thread_create, which is where the
+# 3DS learns a thread's stack size (patch 0001); also frees thread stacks at once.
 # ASFLAGS: Ruby assembles .S files with ASFLAGS only (ARCH_FLAG is empty when cross-compiling);
 # -mfpu=vfp is the ARM11 MPCore's VFPv2. ac_cv_*: features newlib declares but the 3DS lacks.
 CFLAGS_3DS="-std=gnu17 ${ARCH_FLAGS[*]} -ffunction-sections -fdata-sections -O2 -D__3DS__ -D_GNU_SOURCE \
--DTRANSIENT_HEAP_TOTAL_SIZE=0x400000 \
+-DTRANSIENT_HEAP_TOTAL_SIZE=0x400000 -DUSE_THREAD_CACHE=0 \
 -I$HERE/shim/include -include rb3ds_compat.h \
 -I$DEVKITPRO/libctru/include -I$DEVKITPRO/portlibs/3ds/include"
 CONF_ARGS=(
@@ -125,7 +137,8 @@ CONF_ARGS=(
       rb_cv_stack_grow_dir_arm=-1
       rb_cv_binary_elf=no
 )
-CONF_ID="$(printf '%s\n' "${CONF_ARGS[@]}" | sha256sum | cut -d' ' -f1)"
+# The shim library takes part in configure's link tests, so its source counts too.
+CONF_ID="$( (printf '%s\n' "${CONF_ARGS[@]}"; cat "$HERE/shim/rb3ds_shim.c") | sha256sum | cut -d' ' -f1)"
 if [ ! -f "$BUILD/build/Makefile" ] || [ "$(cat "$BUILD/build/.rb3ds-configure" 2>/dev/null || true)" != "$CONF_ID" ]; then
   rm -rf "$BUILD/build"
   mkdir -p "$BUILD/build"

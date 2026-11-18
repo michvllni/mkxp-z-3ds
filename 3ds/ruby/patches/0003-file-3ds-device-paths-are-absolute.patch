@@ -2,6 +2,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 file.c: libctru paths are "device:/..." (sdmc:/, romfs:/). Treat such a prefix like a DOS
 drive letter: absolute in rb_is_absolute_path, skipped by skiproot, kept by expand_path.
 Before: File.expand_path("sdmc:/x") == "#{Dir.pwd}/sdmc:/x".
+File.dirname keeps the device ("sdmc:/a/b" -> "sdmc:/a", not "/a").
 
 --- a/file.c
 +++ b/file.c
@@ -52,7 +53,21 @@ Before: File.expand_path("sdmc:/x") == "#{Dir.pwd}/sdmc:/x".
      else if (!rb_is_absolute_path(s)) {
  	if (!NIL_P(dname)) {
  	    rb_file_expand_path_internal(dname, Qnil, abs_mode, long_name, result);
-@@ -6278,6 +6305,9 @@
+@@ -4806,7 +4833,12 @@
+     if (root > name + 1 && isdirsep(*name))
+ 	root = skipprefix(name = root - 2, end, enc);
+ #else
+-    if (root > name + 1)
++    if (root > name + 1
++#ifdef __3DS__
++	/* keep "sdmc:/" in front: collapsing to root - 1 would drop the device */
++	&& !rb3ds_device_len(name, end)
++#endif
++	)
+ 	name = root - 1;
+ #endif
+     if (n > (end - root + 1) / 2) {
+@@ -6278,6 +6310,9 @@
  #ifndef DOSISH
      if (path[0] == '/') return 1;
  #endif

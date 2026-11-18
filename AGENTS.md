@@ -37,6 +37,10 @@ The toolchain comes from the rmxp3ds dev container (or its `tools/setup-workspac
   `verify-ruby-configure-scripts` job: prefer `ac_cv_*` overrides and C patches.
 - No game content (game data, RTP, Essentials scripts) in this repository.
 
+## Embedding
+`3ds/ruby/shim/include/rb3ds.h`: set `rb3ds_main_stack_size` before `RUBY_INIT_STACK` when Ruby
+runs on a thread other than main() (the runtime's "rgss" thread).
+
 ## Pitfalls
 - devkitARM GCC defaults to C23 (`-std=gnu17` needed for Ruby 3.1) and short enums.
 - Ruby assembles `.S` files with `ASFLAGS` only; without `-mfpu=vfp` and the hard-float flags

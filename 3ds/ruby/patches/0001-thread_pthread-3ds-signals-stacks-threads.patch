@@ -7,9 +7,12 @@ thread_pthread.c for newlib without sigaction (Nintendo 3DS):
 - Threads: set the pthread stack size (no PTHREAD_STACK_MIN in newlib; libctru default 32 KiB)
   and take a non-main thread's stack start from its first frame instead of raising
   NotImplementedError (which killed every new Thread before it held the GVL).
-- New threads get the creating thread's priority (rb3ds_thread_created, shim): libctru creates
-  pthreads at the lowest priority, and the 3DS never runs them while a higher one is runnable.
+- New threads get the creating thread's priority and are detached in libctru
+  (rb3ds_thread_created, shim): libctru creates pthreads at the lowest priority, the 3DS never
+  runs them while a higher one is runnable, and libsysbase ignores PTHREAD_CREATE_DETACHED.
 - native_thread_yield() calls rb3ds_yield() (shim): newlib's sched_yield() is an ENOSYS stub.
+- The embedder can set the Ruby thread's real stack size in rb3ds_main_stack_size (shim,
+  rb3ds.h), e.g. when RUBY_INIT_STACK runs on a dedicated thread (mkxp-z's "rgss" thread).
 
 --- a/thread_pthread.c
 +++ b/thread_pthread.c
@@ -38,22 +41,25 @@ thread_pthread.c for newlib without sigaction (Nintendo 3DS):
  }
  
  #ifdef RB_THREAD_T_HAS_NATIVE_ID
-@@ -961,6 +970,14 @@
+@@ -961,6 +970,17 @@
  	    space = (size_t)addr - ((size_t)((char *)addr - size) / pagesize + 1) * pagesize;
  	}
  	native_main_thread.stack_maxsize = space;
 +#elif defined(__3DS__)
-+	/* Nintendo 3DS (libctru): main() runs on a stack of __stacksize__ bytes, a weak symbol
-+	 * the application may override. stack_start (set above from RUBY_INIT_STACK) lies close
-+	 * to its top; keep a margin for the frames above it and for C code beyond Ruby's checks. */
++	/* Nintendo 3DS (libctru): no way to query a stack's size. The thread calling
++	 * RUBY_INIT_STACK runs on rb3ds_main_stack_size bytes if the embedder set it (e.g. a
++	 * dedicated Ruby thread), else on main()'s stack of __stacksize__ bytes (a weak symbol the
++	 * application may override). stack_start (set above from RUBY_INIT_STACK) lies close to its
++	 * top; keep a margin for the frames above it and for C code beyond Ruby's checks. */
 +	extern uint32_t __stacksize__;
-+	size_t size = (size_t)__stacksize__;
++	extern size_t rb3ds_main_stack_size; /* 3ds/ruby/shim/include/rb3ds.h, set by the embedder */
++	size_t size = rb3ds_main_stack_size ? rb3ds_main_stack_size : (size_t)__stacksize__;
 +	const size_t margin = 64 * 1024;
 +	native_main_thread.stack_maxsize = size > 2 * margin ? size - margin : size / 2;
  #endif
      }
  
-@@ -1012,6 +1029,11 @@
+@@ -1012,6 +1032,11 @@
  	    th->ec->machine.stack_start = (VALUE *)&curr;
  	    th->ec->machine.stack_maxsize = size - diff;
  	}
@@ -65,7 +71,7 @@ thread_pthread.c for newlib without sigaction (Nintendo 3DS):
  #else
  	rb_raise(rb_eNotImpError, "ruby engine can initialize only in the main thread");
  #endif
-@@ -1184,7 +1206,9 @@
+@@ -1184,7 +1209,9 @@
  
  	CHECK_ERR(pthread_attr_init(&attr));
  
@@ -76,7 +82,7 @@ thread_pthread.c for newlib without sigaction (Nintendo 3DS):
  	thread_debug("create - stack size: %lu\n", (unsigned long)stack_size);
  	CHECK_ERR(pthread_attr_setstacksize(&attr, stack_size));
  # endif
-@@ -1195,6 +1219,9 @@
+@@ -1195,6 +1222,9 @@
  	CHECK_ERR(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
  
          err = pthread_create(&th->thread_id, &attr, thread_start_func_1, th);

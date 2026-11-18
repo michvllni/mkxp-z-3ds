@@ -9,6 +9,9 @@
 #include <sys/wait.h>
 
 #include "rb3ds_compat.h"
+#include "rb3ds.h"
+
+size_t rb3ds_main_stack_size = 0;
 
 #define RB3DS_PAGE_SIZE 4096
 
@@ -103,8 +106,14 @@ int chown(const char *path, uid_t owner, gid_t group) {
 	return -1;
 }
 
-// CPU time: the app core runs only this process, so elapsed ARM11 ticks are a close upper
-// bound; used by Ruby's GC timing (GC::Profiler, GC.stat[:time]).
+// CPU time: the app core runs only this process, so ARM11 ticks elapsed since the app started
+// are a close upper bound; used by Process.times, Process.clock_gettime CPU clocks, GC timing.
+static u64 rb3ds_start_tick;
+
+__attribute__((constructor)) static void rb3ds_record_start_tick(void) {
+	rb3ds_start_tick = svcGetSystemTick();
+}
+
 int getrusage(int who, struct rusage *usage) {
 	if (usage == NULL) {
 		errno = EFAULT;
@@ -112,7 +121,9 @@ int getrusage(int who, struct rusage *usage) {
 	}
 	memset(usage, 0, sizeof *usage);
 	if (who != RUSAGE_SELF) return 0;
-	u64 us = svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000000);
+	u64 ticks = svcGetSystemTick() - rb3ds_start_tick;
+	// exact conversion without overflowing 64 bits
+	u64 us = (ticks / SYSCLOCK_ARM11) * 1000000 + (ticks % SYSCLOCK_ARM11) * 1000000 / SYSCLOCK_ARM11;
 	usage->ru_utime.tv_sec = (time_t)(us / 1000000);
 	usage->ru_utime.tv_usec = (suseconds_t)(us % 1000000);
 	return 0;
@@ -175,6 +186,9 @@ void rb3ds_thread_created(pthread_t thread) {
 	if (R_FAILED(svcGetThreadPriority(&prio, CUR_THREAD_HANDLE))) prio = 0x30;
 	// libsysbase's pthread_t is libctru's Thread (libctru source/system/syscalls.c).
 	svcSetThreadPriority(threadGetHandle((Thread)thread), prio);
+	// Ruby creates its threads with PTHREAD_CREATE_DETACHED and never joins them, but libsysbase
+	// ignores that attribute: without this, every finished thread keeps its ~1 MiB stack.
+	threadDetach((Thread)thread);
 }
 
 void rb3ds_yield(void) {

@@ -29,10 +29,13 @@
 #undef F_SETFD
 
 /*
- * Called by thread_pthread.c right after pthread_create: gives the new thread the creator's
- * priority. libctru creates pthreads at the lowest priority (0x3F) and the 3DS kernel never runs a
- * lower-priority thread while a higher one is runnable, so GVL hand-offs (Thread.pass, Queue,
- * ConditionVariable) would never reach it. Equal priorities take turns on sched_yield.
+ * Called by thread_pthread.c right after pthread_create (Ruby's threads are always detached):
+ * - gives the new thread the creator's priority. libctru creates pthreads at the lowest priority
+ *   (0x3F) and the 3DS kernel never runs a lower-priority thread while a higher one is runnable,
+ *   so GVL hand-offs (Thread.pass, Queue, ConditionVariable) would never reach it. Equal
+ *   priorities take turns on rb3ds_yield.
+ * - detaches it in libctru: libsysbase ignores PTHREAD_CREATE_DETACHED, so each finished thread
+ *   would keep its stack (~1 MiB, measured: 30 threads = +30 MB).
  */
 #include <pthread.h>
 void rb3ds_thread_created(pthread_t thread);
