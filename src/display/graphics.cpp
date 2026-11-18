@@ -529,6 +529,12 @@ private:
     void bind() { FBO::bind(rt[dstInd].fbo); }
 };
 
+#ifdef __3DS__
+#define SCREEN_PX_RECT pxRect
+#else
+#define SCREEN_PX_RECT geometry.rect
+#endif
+
 class ScreenScene : public Scene {
 public:
     ScreenScene(int width, int height) : pp(width, height) {
@@ -539,8 +545,8 @@ public:
     }
     
     void composite() {
-        const int w = geometry.rect.w;
-        const int h = geometry.rect.h;
+        const int w = SCREEN_PX_RECT.w;
+        const int h = SCREEN_PX_RECT.h;
         
         shState->prepareDraw();
         
@@ -580,11 +586,11 @@ public:
                  * be turned on, so turn it off temporarily */
                 glState.scissorTest.pushSet(false);
                 
-                int scaleIsSpecial = GLMeta::blitScaleIsSpecial(pp.frontBuffer(), false, geometry.rect, pp.backBuffer(), geometry.rect);
+                int scaleIsSpecial = GLMeta::blitScaleIsSpecial(pp.frontBuffer(), false, SCREEN_PX_RECT, pp.backBuffer(), SCREEN_PX_RECT);
 
                 GLMeta::blitBegin(pp.frontBuffer(), false, scaleIsSpecial);
                 GLMeta::blitSource(pp.backBuffer(), scaleIsSpecial);
-                GLMeta::blitRectangle(geometry.rect, Vec2i());
+                GLMeta::blitRectangle(SCREEN_PX_RECT, Vec2i());
                 GLMeta::blitEnd();
                 
                 glState.scissorTest.pop();
@@ -671,9 +677,25 @@ public:
         brightEffect = norm < 1.0f;
     }
     
+#ifdef __3DS__
+    // mkxp-z-3ds: the scene geometry is in game (logical) coordinates, as its children use it
+    // (sprite and viewport culling, plane size); pxRect is the size of the ping-pong buffers
+    // (Hires). Upstream uses the buffer size for both, which only works for scaling factors >= 1.
+    void setLogicalSize(const Vec2i &size) {
+        logicalSize = size;
+        updateReso(pxRect.w, pxRect.h);
+    }
+#endif
+
     void updateReso(int width, int height) {
+#ifdef __3DS__
+        pxRect = IntRect(0, 0, width, height);
+        geometry.rect.w = logicalSize.x > 0 ? logicalSize.x : width;
+        geometry.rect.h = logicalSize.y > 0 ? logicalSize.y : height;
+#else
         geometry.rect.w = width;
         geometry.rect.h = height;
+#endif
         
         screenQuad.setTexPosRect(geometry.rect, geometry.rect);
         brightnessQuad.setTexPosRect(geometry.rect, geometry.rect);
@@ -689,6 +711,10 @@ public:
     PingPong &getPP() { return pp; }
     
 private:
+#ifdef __3DS__
+    IntRect pxRect;
+    Vec2i logicalSize;
+#endif
     PingPong pp;
     Quad screenQuad;
     
@@ -897,6 +923,10 @@ struct GraphicsPrivate {
         recalculateScreenSize(rtData->config.fixedAspectRatio);
         updateScreenResoRatio(rtData);
         
+#ifdef __3DS__
+        screen.setLogicalSize(scResLores); // mkxp-z-3ds: see ScreenScene::setLogicalSize
+#endif
+
         TEXFBO::init(frozenScene);
         TEXFBO::allocEmpty(frozenScene, scRes.x, scRes.y);
         TEXFBO::linkFBO(frozenScene);
@@ -1544,6 +1574,9 @@ void Graphics::resizeScreen(int width, int height) {
     p->scResLores = sizeLores;
     
     p->screen.setResolution(width, height);
+#ifdef __3DS__
+    p->screen.setLogicalSize(sizeLores); // mkxp-z-3ds: see ScreenScene::setLogicalSize
+#endif
     
     if (p->integerScaleActive)
         p->rebuildIntegerScaleBuffer();

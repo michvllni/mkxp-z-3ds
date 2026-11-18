@@ -63,6 +63,8 @@ SHADER_SRC(plane_frag)
 SHADER_SRC(transSimple_frag)
 SHADER_SRC(tilemap_frag)
 SHADER_SRC(flashMap_frag)
+SHADER_SRC(trans_frag)
+SHADER_SRC(gray_frag)
 #undef SHADER_SRC
 
 GLFunctions gl;
@@ -89,6 +91,7 @@ struct Vtx {
 	float tc[2];
 	float color[4];
 	float tc1[2];
+	float tc2[2];
 };
 const size_t RING_VERTICES = VERTEX_RING_BYTES / sizeof(Vtx) / 3 * 3; // whole triangles
 
@@ -122,7 +125,7 @@ struct VertexArray {
 };
 
 enum class VertKind { Unknown, Simple, SimpleColor, Sprite, Minimal, Tilemap, SimpleMatrix };
-enum class FragKind { Unknown, Simple, SimpleColor, SimpleAlpha, SimpleAlphaUni, FlatColor, Sprite, Tilemap, FlashMap, Blit, Plane, TransSimple };
+enum class FragKind { Unknown, Simple, SimpleColor, SimpleAlpha, SimpleAlphaUni, FlatColor, Sprite, Tilemap, FlashMap, Blit, Plane, TransSimple, Trans, Gray };
 
 struct ShaderObj {
 	GLenum type = 0;
@@ -233,6 +236,7 @@ void initC3D() {
 	AttrInfo_AddLoader(&st.attrInfo, 1, GPU_FLOAT, 2);
 	AttrInfo_AddLoader(&st.attrInfo, 2, GPU_FLOAT, 4);
 	AttrInfo_AddLoader(&st.attrInfo, 3, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(&st.attrInfo, 4, GPU_FLOAT, 2);
 	st.ring = (Vtx *)linearAlloc(VERTEX_RING_BYTES);
 	if (!st.ring) throw Exception(Exception::MKXPError, "gl3ds: out of linear memory for the vertex buffer");
 	st.c3dReady = true;
@@ -480,11 +484,138 @@ u32 packColor(const float *c) {
 	return b(c[0]) | (b(c[1]) << 8) | (b(c[2]) << 16) | (b(c[3]) << 24);
 }
 
-// Texture units a TEV preset samples.
-const int SAMPLE_TEX0 = 1, SAMPLE_TEX1 = 2;
+// GL texture units a fragment program samples, in PICA unit order (PICA unit i uses texture
+// coordinate i).
+struct Units {
+	int n = 0;
+	int gl[3] = {0, 0, 0};
+};
 
-// TEV stages for a fragment program; returns the SAMPLE_* units it samples.
-int setupTexEnv(const Program *prog) {
+Units unitsFor(const Program *prog) {
+	Units u;
+	switch (prog ? prog->frag : FragKind::Unknown) {
+	case FragKind::FlatColor:
+	case FragKind::SimpleColor:
+	case FragKind::FlashMap: break;
+	case FragKind::Blit: u.n = 2, u.gl[0] = 0, u.gl[1] = 1; break;                       // source, destination copy
+	case FragKind::TransSimple: u.n = 2, u.gl[0] = 1, u.gl[1] = 2; break;                // current, frozen scene
+	case FragKind::Trans: u.n = 3, u.gl[0] = 1, u.gl[1] = 2, u.gl[2] = 3; break;         // + transition map
+	default: u.n = 1; break;
+	}
+	return u;
+}
+
+float uniform1(const Program *prog, const char *name, float def) {
+	const float *v = prog->get(name);
+	return v ? v[0] : def;
+}
+
+// TEV stages for gray, tone, opacity, color, flash and invert on texture unit 0 (sprite.frag,
+// plane.frag, tilemap.frag, gray.frag), in the shaders' order. Stages that would do nothing are
+// left out; the PICA has six. Each stage clamps to [0, 1], unlike GLSL (see README).
+//   gray:  rgb = tex * (1 - g) + tonePos + g * (0.299 r + 0.587 g + 0.114 b)   (4 stages; tonePos
+//          comes in through the combiner buffer color)
+//   tone:  rgb + tonePos (folded into the first stage), rgb - toneNeg
+//   color: mix(rgb, color.rgb, color.a); flash likewise; invert: 1 - rgb
+//   alpha: tex.a * opacity
+void effectChain(float gray, const float *tone, float opacity, const float *color, const float *flash, bool invert) {
+	float pos[4] = {0, 0, 0, 0}, neg[4] = {0, 0, 0, 0};
+	bool hasPos = false, hasNeg = false;
+	for (int i = 0; i < 3 && tone; i++) {
+		pos[i] = std::max(tone[i], 0.0f);
+		neg[i] = std::max(-tone[i], 0.0f);
+		hasPos |= pos[i] > 0;
+		hasNeg |= neg[i] > 0;
+	}
+	int s = 0;
+	auto stage = [&]() -> C3D_TexEnv * {
+		if (s < 6) return C3D_GetTexEnv(s++);
+		warnOnce("sprite effects need more than six TEV stages: some are left out");
+		return nullptr;
+	};
+	C3D_TexEnv *e = stage();
+	if (gray > 0) {
+		float c[4] = {1 - gray, 1 - gray, 1 - gray, opacity};
+		C3D_TexEnvBufColor(packColor(pos));
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_TEXTURE0, GPU_CONSTANT, GPU_PREVIOUS_BUFFER);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_MULTIPLY_ADD);
+		C3D_TexEnvSrc(e, C3D_Alpha, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e, C3D_Alpha, GPU_MODULATE);
+		C3D_TexEnvColor(e, packColor(c));
+		static const float lumaF[3] = {0.299f, 0.587f, 0.114f};
+		static const GPU_TEVOP_RGB channel[3] = {GPU_TEVOP_RGB_SRC_R, GPU_TEVOP_RGB_SRC_G, GPU_TEVOP_RGB_SRC_B};
+		for (int i = 0; i < 3; i++) {
+			if (!(e = stage())) return;
+			float w = lumaF[i] * gray, cw[4] = {w, w, w, 0};
+			C3D_TexEnvSrc(e, C3D_RGB, GPU_TEXTURE0, GPU_CONSTANT, GPU_PREVIOUS);
+			C3D_TexEnvOpRgb(e, channel[i], GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+			C3D_TexEnvFunc(e, C3D_RGB, GPU_MULTIPLY_ADD);
+			C3D_TexEnvColor(e, packColor(cw));
+		}
+	} else {
+		float c[4] = {pos[0], pos[1], pos[2], opacity};
+		C3D_TexEnvSrc(e, C3D_Both, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e, C3D_RGB, hasPos ? GPU_ADD : GPU_REPLACE);
+		C3D_TexEnvFunc(e, C3D_Alpha, GPU_MODULATE);
+		C3D_TexEnvColor(e, packColor(c));
+	}
+	if (hasNeg) {
+		if (!(e = stage())) return;
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_SUBTRACT);
+		C3D_TexEnvColor(e, packColor(neg));
+	}
+	for (const float *mixIn : {color, flash}) {
+		if (!mixIn || mixIn[3] <= 0) continue;
+		if (!(e = stage())) return;
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_CONSTANT);
+		C3D_TexEnvOpRgb(e, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_INTERPOLATE);
+		C3D_TexEnvColor(e, packColor(mixIn));
+	}
+	if (invert) {
+		if (!(e = stage())) return;
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+		C3D_TexEnvOpRgb(e, GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_REPLACE);
+	}
+}
+
+// trans.frag: alpha = clamp((map.r - prog) / vague, 0, 1); mix(current, frozen, alpha).
+// PICA units: 0 current, 1 frozen, 2 transition map. The TEV cannot divide: map.r - prog is
+// scaled by 4 per stage while the factor 1/vague is above 4, then multiplied by the rest.
+void transChain(float prog, float vague) {
+	int s = 0;
+	C3D_TexEnv *e = C3D_GetTexEnv(s++);
+	float p[4] = {prog, prog, prog, 0};
+	C3D_TexEnvSrc(e, C3D_RGB, GPU_TEXTURE2, GPU_CONSTANT, GPU_CONSTANT);
+	C3D_TexEnvOpRgb(e, GPU_TEVOP_RGB_SRC_R, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+	C3D_TexEnvFunc(e, C3D_RGB, GPU_SUBTRACT);
+	C3D_TexEnvColor(e, packColor(p));
+	float k = vague > 0 ? 1.0f / vague : 256.0f;
+	while (k > 4 && s < 4) {
+		e = C3D_GetTexEnv(s++);
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_REPLACE);
+		C3D_TexEnvScale(e, C3D_RGB, GPU_TEVSCALE_4);
+		k /= 4;
+	}
+	e = C3D_GetTexEnv(s++);
+	float kc = k > 1 ? k / 4 : k, c[4] = {kc, kc, kc, 0};
+	C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+	C3D_TexEnvFunc(e, C3D_RGB, GPU_MODULATE);
+	C3D_TexEnvColor(e, packColor(c));
+	if (k > 1) C3D_TexEnvScale(e, C3D_RGB, GPU_TEVSCALE_4);
+	e = C3D_GetTexEnv(s++);
+	C3D_TexEnvSrc(e, C3D_Both, GPU_TEXTURE1, GPU_TEXTURE0, GPU_PREVIOUS);
+	C3D_TexEnvOpRgb(e, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_R);
+	C3D_TexEnvOpAlpha(e, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_R);
+	C3D_TexEnvFunc(e, C3D_Both, GPU_INTERPOLATE);
+}
+
+// TEV stages for a fragment program (texture units as in unitsFor). alphaFactor multiplies the
+// opacity (sprite bush).
+void setupTexEnv(const Program *prog, float alphaFactor = 1.0f) {
 	for (int i = 0; i < 6; i++) {
 		C3D_TexEnv *env = C3D_GetTexEnv(i);
 		C3D_TexEnvInit(env); // pass-through of the previous stage
@@ -498,69 +629,42 @@ int setupTexEnv(const Program *prog) {
 		C3D_TexEnvSrc(e0, C3D_Both, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
 		C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
 		C3D_TexEnvColor(e0, c ? packColor(c) : 0);
-		return 0;
+		return;
 	}
 	case FragKind::SimpleColor:
 		C3D_TexEnvSrc(e0, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 		C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
-		return 0;
+		return;
 	case FragKind::FlashMap: {
 		// flashMap.frag: vec4(v_color.rgb * alpha, 1)
-		const float *a = prog->get("alpha");
-		float c[4] = {a ? a[0] : 1.0f, a ? a[0] : 1.0f, a ? a[0] : 1.0f, 1.0f};
+		float a = uniform1(prog, "alpha", 1.0f), c[4] = {a, a, a, 1.0f};
 		C3D_TexEnvSrc(e0, C3D_RGB, GPU_PRIMARY_COLOR, GPU_CONSTANT, GPU_CONSTANT);
 		C3D_TexEnvFunc(e0, C3D_RGB, GPU_MODULATE);
 		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
 		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_REPLACE);
 		C3D_TexEnvColor(e0, packColor(c));
-		return 0;
+		return;
 	}
 	case FragKind::SimpleAlpha:
 		C3D_TexEnvSrc(e0, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
 		C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
 		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
-		return SAMPLE_TEX0;
-	case FragKind::SimpleAlphaUni: {
-		const float *a = prog->get("alpha");
-		float c[4] = {0, 0, 0, a ? a[0] : 1.0f};
-		C3D_TexEnvSrc(e0, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
-		C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
-		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
-		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
-		C3D_TexEnvColor(e0, packColor(c));
-		return SAMPLE_TEX0;
-	}
+		return;
+	case FragKind::SimpleAlphaUni:
+		effectChain(0, nullptr, uniform1(prog, "alpha", 1.0f) * alphaFactor, nullptr, nullptr, false);
+		return;
 	case FragKind::Sprite:
-	case FragKind::Tilemap: {
-		// sprite.frag without gray, pattern, invert and bush (not yet supported), and
-		// tilemap.frag (the same without those) without gray:
-		// rgb = mix(tex.rgb + tone.rgb, color.rgb, color.a); a = tex.a * opacity
+		if (uniform1(prog, "renderPattern", 0) != 0) warnOnce("sprite patterns not supported yet");
+		/* fallthrough */
+	case FragKind::Tilemap:
+	case FragKind::Plane:
+	case FragKind::Gray: {
 		const float *tone = prog->get("tone");
-		const float *opacity = prog->get("opacity");
-		const float *color = prog->get("color");
-		float pos[4] = {0, 0, 0, opacity ? opacity[0] : 1.0f}, neg[4] = {0, 0, 0, 1};
-		for (int i = 0; i < 3 && tone; i++) {
-			pos[i] = std::max(tone[i], 0.0f);
-			neg[i] = std::max(-tone[i], 0.0f);
-		}
-		if (tone && tone[3] > 0) warnOnce("sprite gray tone not supported yet");
-		C3D_TexEnvSrc(e0, C3D_Both, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
-		C3D_TexEnvFunc(e0, C3D_RGB, GPU_ADD);
-		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
-		C3D_TexEnvColor(e0, packColor(pos));
-		C3D_TexEnv *e1 = C3D_GetTexEnv(1);
-		C3D_TexEnvSrc(e1, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
-		C3D_TexEnvFunc(e1, C3D_RGB, GPU_SUBTRACT);
-		C3D_TexEnvColor(e1, packColor(neg));
-		C3D_TexEnv *e2 = C3D_GetTexEnv(2);
-		C3D_TexEnvSrc(e2, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_CONSTANT);
-		C3D_TexEnvOpRgb(e2, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
-		C3D_TexEnvFunc(e2, C3D_RGB, GPU_INTERPOLATE);
-		float c[4] = {0, 0, 0, 0};
-		if (color) memcpy(c, color, sizeof c);
-		C3D_TexEnvColor(e2, packColor(c));
-		return SAMPLE_TEX0;
+		float gray = kind == FragKind::Gray ? uniform1(prog, "gray", 0) : tone ? tone[3] : 0;
+		effectChain(gray, tone, uniform1(prog, "opacity", 1.0f) * alphaFactor, kind == FragKind::Gray ? nullptr : prog->get("color"),
+		            kind == FragKind::Plane ? prog->get("flash") : nullptr, kind == FragKind::Sprite && uniform1(prog, "invert", 0) != 0);
+		return;
 	}
 	case FragKind::Blit: {
 		// bitmapBlit.frag (unit 0 source, unit 1 a copy of the destination):
@@ -569,8 +673,7 @@ int setupTexEnv(const Program *prog) {
 		// The TEV cannot divide; this computes rgb = mix(src.rgb, dst.rgb, w), which is exact
 		// when dst.a is 0 or 1 (transparent or opaque destination pixels) and close in between.
 		// Stage 0: rgb = src, a = co1 (also into the combiner buffer, read by stage 2).
-		const float *opacity = prog->get("opacity");
-		float c[4] = {0, 0, 0, opacity ? opacity[0] : 1.0f};
+		float c[4] = {0, 0, 0, uniform1(prog, "opacity", 1.0f)};
 		C3D_TexEnvSrc(e0, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
 		C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
 		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
@@ -589,18 +692,23 @@ int setupTexEnv(const Program *prog) {
 		C3D_TexEnvFunc(e2, C3D_RGB, GPU_INTERPOLATE);
 		C3D_TexEnvSrc(e2, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS_BUFFER, GPU_PREVIOUS);
 		C3D_TexEnvFunc(e2, C3D_Alpha, GPU_ADD);
-		return SAMPLE_TEX0 | SAMPLE_TEX1;
+		return;
 	}
+	case FragKind::TransSimple: {
+		// transSimple.frag: mix(frozen, current, prog); unit 0 current, unit 1 frozen
+		float p = uniform1(prog, "prog", 0), c[4] = {p, p, p, p};
+		C3D_TexEnvSrc(e0, C3D_Both, GPU_TEXTURE0, GPU_TEXTURE1, GPU_CONSTANT);
+		C3D_TexEnvFunc(e0, C3D_Both, GPU_INTERPOLATE);
+		C3D_TexEnvColor(e0, packColor(c));
+		return;
+	}
+	case FragKind::Trans:
+		transChain(uniform1(prog, "prog", 0), uniform1(prog, "vague", 0));
+		return;
 	default: {
 		if (kind == FragKind::Unknown) warnOnce("unknown fragment program: drawn as plain texture");
-		if (kind == FragKind::Plane || kind == FragKind::TransSimple) warnOnce("plane/transition effects not supported yet");
-		C3D_TexEnvSrc(e0, C3D_Both, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
-		C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
-		const float *opacity = prog ? prog->get("opacity") : nullptr;
-		float c[4] = {0, 0, 0, opacity ? opacity[0] : 1.0f};
-		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
-		C3D_TexEnvColor(e0, packColor(c));
-		return SAMPLE_TEX0;
+		effectChain(0, nullptr, uniform1(prog, "opacity", 1.0f) * alphaFactor, nullptr, nullptr, false);
+		return;
 	}
 	}
 }
@@ -640,9 +748,17 @@ void tilemapAnimate(const Program *prog, float &u, float &v) {
 	v += tileH * row;
 }
 
-// Runs the vertex program on the CPU for one vertex.
-void transformVertex(const Program *prog, const VertexArray &va, size_t vi, bool screen, const Tex *tex0, const Tex *tex1, Vtx &v) {
+// A vertex before it goes to the GPU: Vtx plus the program's texture coordinate (v_texCoord,
+// normalized; used for the sprite bush).
+struct CpuVtx {
+	Vtx v;
+	float u, w;
+};
+
+// Runs the vertex program on the CPU for one vertex. tex: the textures of PICA units 0-2.
+void transformVertex(const Program *prog, const VertexArray &va, size_t vi, bool screen, Tex *const tex[3], CpuVtx &cv) {
 	static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+	Vtx &v = cv.v;
 	const float *proj = prog->get("projMat");
 	if (!proj) proj = identity;
 	const float *translation = prog->get("translation");
@@ -681,22 +797,67 @@ void transformVertex(const Program *prog, const VertexArray &va, size_t vi, bool
 		u *= texSizeInv[0];
 		w *= texSizeInv[1];
 	}
-	// logical [0, 1] texture coordinates -> padded texture
-	v.tc[0] = tex0 ? u * tex0->w / tex0->pw : u;
-	v.tc[1] = tex0 ? w * tex0->h / tex0->ph : w;
-	if (tex1) {
-		// bitmapBlit.frag: dstCoor = (v_texCoord - subRect.xy) * subRect.zw
-		const float *sub = prog->get("subRect");
-		float du = sub ? (u - sub[0]) * sub[2] : u, dv = sub ? (w - sub[1]) * sub[3] : w;
-		v.tc1[0] = du * tex1->w / tex1->pw;
-		v.tc1[1] = dv * tex1->h / tex1->ph;
-	} else {
-		v.tc1[0] = v.tc1[1] = 0;
+	cv.u = u, cv.w = w;
+	// logical [0, 1] texture coordinates -> each unit's padded texture
+	float *tcs[3] = {v.tc, v.tc1, v.tc2};
+	for (int i = 0; i < 3; i++) {
+		float du = u, dv = w;
+		if (i == 1 && prog->frag == FragKind::Blit) {
+			// bitmapBlit.frag: dstCoor = (v_texCoord - subRect.xy) * subRect.zw
+			if (const float *sub = prog->get("subRect")) du = (u - sub[0]) * sub[2], dv = (w - sub[1]) * sub[3];
+		}
+		tcs[i][0] = tex[i] ? du * tex[i]->w / tex[i]->pw : du;
+		tcs[i][1] = tex[i] ? dv * tex[i]->h / tex[i]->ph : dv;
 	}
 	if (c)
 		memcpy(v.color, c, sizeof v.color);
 	else
 		v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1;
+}
+
+CpuVtx lerpVtx(const CpuVtx &a, const CpuVtx &b, float t) {
+	CpuVtx r;
+	const float *fa = (const float *)&a, *fb = (const float *)&b;
+	float *fr = (float *)&r;
+	for (size_t i = 0; i < sizeof(CpuVtx) / sizeof(float); i++) fr[i] = fa[i] + (fb[i] - fa[i]) * t;
+	return r;
+}
+
+// Sprite bush (sprite.frag): fragments where (v_texCoord on one side of the bush line) ==
+// bushUnder keep their alpha, the others get bushOpacity. The TEV cannot test texture
+// coordinates, so the triangles are split along the line on the CPU (all attributes are linear
+// over a triangle). Returns false if the program has no bush to apply.
+bool splitBush(const Program *prog, const std::vector<CpuVtx> &in, std::vector<CpuVtx> &keep, std::vector<CpuVtx> &faded, float *fadedFactor) {
+	if (prog->frag != FragKind::Sprite) return false;
+	float bushOpacity = uniform1(prog, "bushOpacity", 1.0f);
+	if (bushOpacity >= 1.0f) return false;
+	bool bushY = uniform1(prog, "bushY", 1) != 0, bushUnder = uniform1(prog, "bushUnder", 1) != 0;
+	float slope = uniform1(prog, "bushSlope", 0), intercept = uniform1(prog, "bushIntercept", 1);
+	// f < 0: underBush
+	auto f = [&](const CpuVtx &v) { return bushY ? v.w - (slope * v.u + intercept) : v.u - (slope * v.w + intercept); };
+	*fadedFactor = std::max(bushOpacity, 0.0f);
+	for (size_t t = 0; t + 2 < in.size(); t += 3) {
+		const CpuVtx *tri = &in[t];
+		for (int side = 0; side < 2; side++) {
+			bool wantUnder = side == 0;
+			std::vector<CpuVtx> &out = (wantUnder == bushUnder) ? keep : faded;
+			// Sutherland-Hodgman against the half-plane (f < 0 for under, f >= 0 above)
+			CpuVtx poly[4];
+			int n = 0;
+			for (int i = 0; i < 3; i++) {
+				const CpuVtx &a = tri[i], &b = tri[(i + 1) % 3];
+				float fa = wantUnder ? -f(a) : f(a), fb = wantUnder ? -f(b) : f(b);
+				if (fa >= 0) poly[n++] = a;
+				if ((fa >= 0) != (fb >= 0) && n < 4) poly[n++] = lerpVtx(a, b, fa / (fa - fb));
+			}
+			for (int i = 1; i + 1 < n; i++) {
+				out.push_back(poly[0]);
+				out.push_back(poly[i]);
+				out.push_back(poly[i + 1]);
+			}
+		}
+	}
+	return true;
 }
 
 void bindSampled(int unit, Tex *t) {
@@ -709,53 +870,21 @@ void bindSampled(int unit, Tex *t) {
 	C3D_TexBind(unit, &t->tex);
 }
 
-// Draws count indexed vertices (GL_TRIANGLES, uint16 indices at byte offset) with the current
-// program, textures and state; clearQuad draws a quad of quadColor over the whole target.
-void draw(GLsizei count, uintptr_t indexOffset, bool clearQuad = false, const float *quadColor = nullptr) {
-	bool screen;
-	Tex *targetTex;
-	C3D_RenderTarget *target = currentTarget(&screen, &targetTex); // may end the frame
-	if (!target) return;
-
-	Program *prog = nullptr;
-	Tex *tex0 = nullptr, *tex1 = nullptr;
-	const VertexArray *va = nullptr;
-	const uint16_t *indices = nullptr;
-	if (clearQuad) {
-		count = 6;
-	} else {
-		auto pit = st.programs.find(st.program);
-		prog = pit == st.programs.end() ? nullptr : &pit->second;
-		if (!prog) return;
-		va = st.boundVertexArray ? &st.vertexArrays[st.boundVertexArray] : &st.defaultVertexArray;
-		auto ib = st.buffers.find(va->elementBuffer);
-		if (ib == st.buffers.end() || indexOffset + (size_t)count * 2 > ib->second.data.size()) return;
-		indices = (const uint16_t *)(ib->second.data.data() + indexOffset);
-	}
-
-	for (GLsizei first = 0; first < count;) {
-		GLsizei n = std::min((GLsizei)RING_VERTICES, count - first);
+// Sends vertices (whole triangles) to the GPU in chunks that fit the vertex ring, with the TEV
+// and blend state of prog (nullptr: the clear quad).
+void emit(const std::vector<CpuVtx> &verts, C3D_RenderTarget *target, bool screen, Tex *targetTex, const Program *prog, Tex *const tex[3],
+          float alphaFactor, bool clearQuad) {
+	for (size_t first = 0; first < verts.size();) {
+		size_t n = std::min(RING_VERTICES, verts.size() - first);
 		beginFrame();
-		if (st.ringUsed + (size_t)n > RING_VERTICES || gpuCmdBufOffset + CMDBUF_RESERVE_WORDS > gpuCmdBufSize) {
+		if (st.ringUsed + n > RING_VERTICES || gpuCmdBufOffset + CMDBUF_RESERVE_WORDS > gpuCmdBufSize) {
 			endFrame(); // vertex ring or command buffer full: submit; beginFrame waits for it
 			beginFrame();
 		}
 		C3D_FrameDrawOn(target);
 		Vtx *out = st.ring + st.ringUsed;
-		int sampled = 0;
+		for (size_t i = 0; i < n; i++) out[i] = verts[first + i].v;
 		if (clearQuad) {
-			// two triangles over the target in clip space, constant color, no blending
-			static const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {1, 1}, {-1, 1}, {-1, -1}};
-			for (int i = 0; i < 6; i++) {
-				Vtx &v = out[i];
-				float x = corners[i][0], y = corners[i][1];
-				v.pos[0] = screen ? SCREEN_XX * y : x;
-				v.pos[1] = screen ? SCREEN_YX * x : y;
-				v.pos[2] = -0.5f; // PICA clip space: -w <= z <= 0
-				v.pos[3] = 1;
-				v.tc[0] = v.tc[1] = v.tc1[0] = v.tc1[1] = 0;
-				memcpy(v.color, quadColor, sizeof v.color);
-			}
 			for (int i = 0; i < 6; i++) C3D_TexEnvInit(C3D_GetTexEnv(i));
 			C3D_TexEnvBufUpdate(C3D_Both, 0);
 			C3D_TexEnv *e0 = C3D_GetTexEnv(0);
@@ -763,16 +892,7 @@ void draw(GLsizei count, uintptr_t indexOffset, bool clearQuad = false, const fl
 			C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
 			C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 		} else {
-			sampled = setupTexEnv(prog);
-			tex0 = (sampled & SAMPLE_TEX0) ? texture(st.boundTex[0]) : nullptr;
-			tex1 = (sampled & SAMPLE_TEX1) ? texture(st.boundTex[1]) : nullptr;
-			if (((sampled & SAMPLE_TEX0) && (!tex0 || !tex0->allocated)) || ((sampled & SAMPLE_TEX1) && (!tex1 || !tex1->allocated)))
-				return;
-			if ((tex0 && tex0 == targetTex) || (tex1 && tex1 == targetTex)) {
-				warnOnce("feedback loop (texture is the render target): skipped");
-				return;
-			}
-			for (GLsizei i = 0; i < n; i++) transformVertex(prog, *va, indices[first + i], screen, tex0, tex1, out[i]);
+			setupTexEnv(prog, alphaFactor);
 			if (prog->frag == FragKind::Blit)
 				// the TEV preset already composites with the destination copy (unit 1)
 				C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
@@ -783,22 +903,81 @@ void draw(GLsizei count, uintptr_t indexOffset, bool clearQuad = false, const fl
 				C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 		}
 		// unbind what is not sampled: citro3d keeps pointers to bound C3D_Tex structs
-		bindSampled(0, tex0);
-		bindSampled(1, tex1);
-		if (tex0) tex0->useSerial = st.frameSerial;
-		if (tex1) tex1->useSerial = st.frameSerial;
+		for (int i = 0; i < 3; i++) {
+			bindSampled(i, tex[i]);
+			if (tex[i]) tex[i]->useSerial = st.frameSerial;
+		}
 		if (targetTex) targetTex->useSerial = st.frameSerial;
 		applyViewportScissor(screen, st.scissorTest, targetTex, clearQuad);
 		C3D_BindProgram(&st.shader);
 		C3D_SetAttrInfo(&st.attrInfo);
 		C3D_BufInfo *bi = C3D_GetBufInfo();
 		BufInfo_Init(bi);
-		BufInfo_Add(bi, out, sizeof(Vtx), 4, 0x3210);
+		BufInfo_Add(bi, out, sizeof(Vtx), 5, 0x43210);
 		C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_ALL);
 		C3D_CullFace(GPU_CULL_NONE);
-		C3D_DrawArrays(GPU_TRIANGLES, 0, n);
+		C3D_DrawArrays(GPU_TRIANGLES, 0, (int)n);
 		st.ringUsed += n;
 		first += n;
+	}
+}
+
+// Draws count indexed vertices (GL_TRIANGLES, uint16 indices at byte offset) with the current
+// program, textures and state; clearQuad draws a quad of quadColor over the whole target.
+void draw(GLsizei count, uintptr_t indexOffset, bool clearQuad = false, const float *quadColor = nullptr) {
+	bool screen;
+	Tex *targetTex;
+	C3D_RenderTarget *target = currentTarget(&screen, &targetTex); // may end the frame
+	if (!target) return;
+	static std::vector<CpuVtx> verts, faded;
+	verts.clear();
+	Tex *tex[3] = {nullptr, nullptr, nullptr};
+	Program *prog = nullptr;
+	if (clearQuad) {
+		// two triangles over the target in clip space, constant color, no blending
+		static const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {1, 1}, {-1, 1}, {-1, -1}};
+		verts.resize(6);
+		for (int i = 0; i < 6; i++) {
+			Vtx &v = verts[i].v;
+			memset(&verts[i], 0, sizeof(CpuVtx));
+			float x = corners[i][0], y = corners[i][1];
+			v.pos[0] = screen ? SCREEN_XX * y : x;
+			v.pos[1] = screen ? SCREEN_YX * x : y;
+			v.pos[2] = -0.5f; // PICA clip space: -w <= z <= 0
+			v.pos[3] = 1;
+			memcpy(v.color, quadColor, sizeof v.color);
+		}
+		emit(verts, target, screen, targetTex, nullptr, tex, 1.0f, true);
+		return;
+	}
+	auto pit = st.programs.find(st.program);
+	prog = pit == st.programs.end() ? nullptr : &pit->second;
+	if (!prog) return;
+	const VertexArray &va = st.boundVertexArray ? st.vertexArrays[st.boundVertexArray] : st.defaultVertexArray;
+	auto ib = st.buffers.find(va.elementBuffer);
+	if (ib == st.buffers.end() || indexOffset + (size_t)count * 2 > ib->second.data.size()) return;
+	const uint16_t *indices = (const uint16_t *)(ib->second.data.data() + indexOffset);
+	Units units = unitsFor(prog);
+	for (int i = 0; i < units.n; i++) {
+		tex[i] = texture(st.boundTex[units.gl[i]]);
+		if (!tex[i] || !tex[i]->allocated) return;
+		if (tex[i] == targetTex) {
+			warnOnce("feedback loop (texture is the render target): skipped");
+			return;
+		}
+	}
+	count -= count % 3;
+	verts.resize(count);
+	for (GLsizei i = 0; i < count; i++) transformVertex(prog, va, indices[i], screen, tex, verts[i]);
+	static std::vector<CpuVtx> keep;
+	keep.clear();
+	faded.clear();
+	float fadedFactor = 1.0f;
+	if (splitBush(prog, verts, keep, faded, &fadedFactor)) {
+		emit(keep, target, screen, targetTex, prog, tex, 1.0f, false);
+		emit(faded, target, screen, targetTex, prog, tex, fadedFactor, false);
+	} else {
+		emit(verts, target, screen, targetTex, prog, tex, 1.0f, false);
 	}
 }
 
@@ -1080,6 +1259,8 @@ void APIENTRY linkProgram(GLuint p) {
 		else if (src == mkxp_shader_transSimple_frag) prog.frag = FragKind::TransSimple;
 		else if (src == mkxp_shader_tilemap_frag) prog.frag = FragKind::Tilemap;
 		else if (src == mkxp_shader_flashMap_frag) prog.frag = FragKind::FlashMap;
+		else if (src == mkxp_shader_trans_frag) prog.frag = FragKind::Trans;
+		else if (src == mkxp_shader_gray_frag) prog.frag = FragKind::Gray;
 	}
 }
 void APIENTRY getProgramiv(GLuint, GLenum pname, GLint *params) { *params = (pname == GL_LINK_STATUS) ? GL_TRUE : 0; }

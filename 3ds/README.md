@@ -53,15 +53,18 @@ involved.
   - tone and color of sprites and tilemaps: each TEV stage clamps, so a tone that saturates a
     channel is clamped before the color is mixed in (GLSL clamps only at the end; differs only
     with both a strong tone and a color/flash);
-  - sprites and tilemap layers (opacity, color, tone without gray), autotile animation, window
+  - sprites, planes and tilemap layers: opacity, color, tone incl. gray, sprite bush (geometry
+    split on the CPU at the bush line) and invert, plane flash; autotile animation, window
     contents, tilemap flashes, plain textures, flat and vertex colors;
+  - viewport and screen effects (tone incl. gray, color, flash, brightness);
+  - `Graphics.transition`, plain and with a transition image (the threshold ramp is scaled in
+    steps of 4 on the TEV because it cannot divide; 8-bit precision);
   - presenting to the top screen.
 
   **Missing:**
   - Textures over 1024 px (stored as pieces later; the table reports 4096 so mkxp-z's tileset
     atlas fits real tilesets).
-  - The gray tone of sprites and tilemaps; bush, pattern and invert of sprites.
-  - Plane and transitions.
+  - Sprite patterns (mkxp-z extension).
   - Hue, blur and the remaining programs (drawn as plain texture, logged once).
 - **Screen resolution (rmxp3ds D15):** the game screen is rendered at 3DS height, pillarboxed.
   mkxp-z's Hires mode scales its screen buffers by `framebufferScalingFactor`. `main3ds.cpp`
@@ -94,6 +97,18 @@ involved.
     a bitmap with the same box (`fill_rect` then fills only a quarter).
   - `src/display/gl/texpool.h`: the pool of disposed bitmaps keeps 4 MB instead of 20 MB.
   - `src/display/tilemap.cpp`: tile texture insets stay half a texel below 1:1 scaling.
+  - Hires with a scaling factor below 1, which upstream does not handle:
+    - `src/display/graphics.cpp` `ScreenScene`: the scene geometry stays in game coordinates
+      (sprite and viewport culling, plane size); the ping-pong buffer size drives the GL
+      viewport and blits. Upstream uses the buffer size for both, which culls everything beyond
+      320×240 at factor 0.5.
+    - `src/display/gl/shader.cpp`: `GrayShader` takes the scaled projection (its screen quad is
+      in game coordinates now).
+    - `src/display/gl/gl-meta.cpp`: shader blits (no native blit on the 3DS) project to the
+      target's pixel size; upstream applies the Hires projection when the target is a ping-pong
+      buffer, which shrinks the copy.
+  - `src/display/plane.cpp`: the tiled path (no `npot_repeat` on the 3DS) places tiles at the
+    viewport's position and scrolls with its origin, as the `npot_repeat` path does.
   - `binding/binding-mri.cpp` `showExc`: the uncaught-error text also goes to `rgssErrorMsg`.
 - **MIDI:** fluidsynth is loaded at run time as on desktop. That fails on the 3DS, so MIDI is
   disabled.

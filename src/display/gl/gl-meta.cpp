@@ -192,6 +192,15 @@ int smoothScalingMethod(int scaleIsSpecial)
 	return shState->config().smoothScaling;
 }
 
+// mkxp-z-3ds: blit rectangles are in the target's pixels, so the shader blit's projection is the
+// target size. applyViewportProj() applies the Hires scaling when the target is a ping-pong
+// buffer, which shrinks the copy (desktop uses native blits and never gets here).
+#ifdef __3DS__
+#define BLIT_PROJ(shader) shader.projMat.set(size)
+#else
+#define BLIT_PROJ(shader) shader.applyViewportProj()
+#endif
+
 static void _blitBegin(FBO::ID fbo, const Vec2i &size, int scaleIsSpecial)
 {
 	if (HAVE_NATIVE_BLIT)
@@ -210,7 +219,7 @@ static void _blitBegin(FBO::ID fbo, const Vec2i &size, int scaleIsSpecial)
 		{
 			BicubicShader &shader = shState->shaders().bicubic;
 			shader.bind();
-			shader.applyViewportProj();
+			BLIT_PROJ(shader);
 			shader.setTranslation(Vec2i());
 			shader.setTexSize(Vec2i(size.x, size.y));
 			shader.setSharpness(shState->config().bicubicSharpness);
@@ -221,7 +230,7 @@ static void _blitBegin(FBO::ID fbo, const Vec2i &size, int scaleIsSpecial)
 		{
 			Lanczos3Shader &shader = shState->shaders().lanczos3;
 			shader.bind();
-			shader.applyViewportProj();
+			BLIT_PROJ(shader);
 			shader.setTranslation(Vec2i());
 			shader.setTexSize(Vec2i(size.x, size.y));
 		}
@@ -232,7 +241,7 @@ static void _blitBegin(FBO::ID fbo, const Vec2i &size, int scaleIsSpecial)
 		{
 			XbrzShader &shader = shState->shaders().xbrz;
 			shader.bind();
-			shader.applyViewportProj();
+			BLIT_PROJ(shader);
 			shader.setTranslation(Vec2i());
 			shader.setTexSize(Vec2i(size.x, size.y));
 			shader.setTargetScale(Vec2(1., 1.));
@@ -244,7 +253,7 @@ static void _blitBegin(FBO::ID fbo, const Vec2i &size, int scaleIsSpecial)
 		{
 			SimpleShader &shader = shState->shaders().simple;
 			shader.bind();
-			shader.applyViewportProj();
+			BLIT_PROJ(shader);
 			shader.setTranslation(Vec2i());
 			shader.setTexSize(Vec2i(size.x, size.y));
 		}
