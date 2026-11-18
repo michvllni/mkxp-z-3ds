@@ -34,6 +34,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <map>
 #include <string>
@@ -511,21 +512,27 @@ float uniform1(const Program *prog, const char *name, float def) {
 }
 
 // TEV stages for gray, tone, opacity, color, flash and invert on texture unit 0 (sprite.frag,
-// plane.frag, tilemap.frag, gray.frag), in the shaders' order. Stages that would do nothing are
-// left out; the PICA has six. Each stage clamps to [0, 1], unlike GLSL (see README).
-//   gray:  rgb = tex * (1 - g) + tonePos + g * (0.299 r + 0.587 g + 0.114 b)   (4 stages; tonePos
-//          comes in through the combiner buffer color)
-//   tone:  rgb + tonePos (folded into the first stage), rgb - toneNeg
-//   color: mix(rgb, color.rgb, color.a); flash likewise; invert: 1 - rgb
-//   alpha: tex.a * opacity
+// plane.frag, tilemap.frag, gray.frag). GLSL clamps only at the end, each TEV stage clamps, so
+// the order is rearranged to keep intermediate values in [0, 1]:
+//   GLSL:  y = mix(mix(gray(x) + t, C, c.a), F, f.a); invert: 1 - y
+//   here:  y = mix(mix(gray(x), C, c.a), F, f.a) + t * (1 - c.a) * (1 - f.a)   (same value)
+// gray(x) = x * (1 - g) + g * (0.299 r + 0.587 g + 0.114 b) (4 stages, luma via per-channel
+// multiply-add). The tone is one ADD_SIGNED stage when every channel is within ±0.5 after
+// scaling, else an add and a subtract stage (a channel's tone has one sign, so those clamps are
+// exact too). Invert is folded into the tone stage (1 - (y + t) = (1 - y) - t; clamping commutes
+// with 1 - v). Alpha: tex.a * opacity (stage 0's constant: the combiner buffer cannot be used
+// there, stage 0 reads it as 0). Stages that would do nothing are left out; the PICA has six.
 void effectChain(float gray, const float *tone, float opacity, const float *color, const float *flash, bool invert) {
-	float pos[4] = {0, 0, 0, 0}, neg[4] = {0, 0, 0, 0};
-	bool hasPos = false, hasNeg = false;
+	const float *mixes[2] = {color && color[3] > 0 ? color : nullptr, flash && flash[3] > 0 ? flash : nullptr};
+	float keep = 1.0f; // share of the pre-mix value left after the mixes
+	for (const float *m : mixes)
+		if (m) keep *= 1.0f - m[3];
+	float t[3] = {0, 0, 0};
+	bool hasTone = false, small = true;
 	for (int i = 0; i < 3 && tone; i++) {
-		pos[i] = std::max(tone[i], 0.0f);
-		neg[i] = std::max(-tone[i], 0.0f);
-		hasPos |= pos[i] > 0;
-		hasNeg |= neg[i] > 0;
+		t[i] = tone[i] * keep;
+		hasTone |= t[i] != 0;
+		small &= std::fabs(t[i]) <= 0.5f;
 	}
 	int s = 0;
 	auto stage = [&]() -> C3D_TexEnv * {
@@ -536,11 +543,8 @@ void effectChain(float gray, const float *tone, float opacity, const float *colo
 	C3D_TexEnv *e = stage();
 	if (gray > 0) {
 		float c[4] = {1 - gray, 1 - gray, 1 - gray, opacity};
-		C3D_TexEnvBufColor(packColor(pos));
-		C3D_TexEnvSrc(e, C3D_RGB, GPU_TEXTURE0, GPU_CONSTANT, GPU_PREVIOUS_BUFFER);
-		C3D_TexEnvFunc(e, C3D_RGB, GPU_MULTIPLY_ADD);
-		C3D_TexEnvSrc(e, C3D_Alpha, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
-		C3D_TexEnvFunc(e, C3D_Alpha, GPU_MODULATE);
+		C3D_TexEnvSrc(e, C3D_Both, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e, C3D_Both, GPU_MODULATE);
 		C3D_TexEnvColor(e, packColor(c));
 		static const float lumaF[3] = {0.299f, 0.587f, 0.114f};
 		static const GPU_TEVOP_RGB channel[3] = {GPU_TEVOP_RGB_SRC_R, GPU_TEVOP_RGB_SRC_G, GPU_TEVOP_RGB_SRC_B};
@@ -553,27 +557,50 @@ void effectChain(float gray, const float *tone, float opacity, const float *colo
 			C3D_TexEnvColor(e, packColor(cw));
 		}
 	} else {
-		float c[4] = {pos[0], pos[1], pos[2], opacity};
+		float c[4] = {0, 0, 0, opacity};
 		C3D_TexEnvSrc(e, C3D_Both, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
-		C3D_TexEnvFunc(e, C3D_RGB, hasPos ? GPU_ADD : GPU_REPLACE);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_REPLACE);
 		C3D_TexEnvFunc(e, C3D_Alpha, GPU_MODULATE);
 		C3D_TexEnvColor(e, packColor(c));
 	}
-	if (hasNeg) {
-		if (!(e = stage())) return;
-		C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
-		C3D_TexEnvFunc(e, C3D_RGB, GPU_SUBTRACT);
-		C3D_TexEnvColor(e, packColor(neg));
-	}
-	for (const float *mixIn : {color, flash}) {
-		if (!mixIn || mixIn[3] <= 0) continue;
+	for (int i = 0; i < 2; i++) {
+		if (!mixes[i]) continue;
 		if (!(e = stage())) return;
 		C3D_TexEnvSrc(e, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_CONSTANT);
 		C3D_TexEnvOpRgb(e, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
 		C3D_TexEnvFunc(e, C3D_RGB, GPU_INTERPOLATE);
-		C3D_TexEnvColor(e, packColor(mixIn));
+		C3D_TexEnvColor(e, packColor(mixes[i]));
 	}
-	if (invert) {
+	const GPU_TEVOP_RGB prevOp = invert ? GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR : GPU_TEVOP_RGB_SRC_COLOR;
+	if (hasTone && small) {
+		// ADD_SIGNED: prev + c - 0.5 with c = 0.5 + t (inverted: (1 - prev) + 0.5 - t)
+		if (!(e = stage())) return;
+		float c[4];
+		for (int i = 0; i < 3; i++) c[i] = (128.0f + (invert ? -t[i] : t[i]) * 255.0f) / 255.0f;
+		c[3] = 0;
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvOpRgb(e, prevOp, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_ADD_SIGNED);
+		C3D_TexEnvColor(e, packColor(c));
+	} else if (hasTone) {
+		// add the positive part, subtract the negative part (inverted: 1 - prev first, then the
+		// signs swap)
+		float pos[4] = {0, 0, 0, 0}, neg[4] = {0, 0, 0, 0};
+		for (int i = 0; i < 3; i++) {
+			float v = invert ? -t[i] : t[i];
+			pos[i] = std::max(v, 0.0f);
+			neg[i] = std::max(-v, 0.0f);
+		}
+		if (!(e = stage())) return;
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvOpRgb(e, prevOp, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_ADD);
+		C3D_TexEnvColor(e, packColor(pos));
+		if (!(e = stage())) return;
+		C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e, C3D_RGB, GPU_SUBTRACT);
+		C3D_TexEnvColor(e, packColor(neg));
+	} else if (invert) {
 		if (!(e = stage())) return;
 		C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
 		C3D_TexEnvOpRgb(e, GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);

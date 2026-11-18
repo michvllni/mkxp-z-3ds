@@ -931,7 +931,13 @@ struct GraphicsPrivate {
         TEXFBO::allocEmpty(frozenScene, scRes.x, scRes.y);
         TEXFBO::linkFBO(frozenScene);
         
+#ifdef __3DS__
+        // mkxp-z-3ds: the transition quad is drawn with the game-size projection (a ping-pong
+        // buffer is bound) and texture size (transSize), so it is in game coordinates
+        FloatRect screenRect(0, 0, scResLores.x, scResLores.y);
+#else
         FloatRect screenRect(0, 0, scRes.x, scRes.y);
+#endif
         screenQuad.setTexPosRect(screenRect, screenRect);
         
         fpsLimiter.resetFrameAdjust();
@@ -1583,10 +1589,19 @@ void Graphics::resizeScreen(int width, int height) {
     
     TEXFBO::allocEmpty(p->frozenScene, width, height);
     
+#ifdef __3DS__
+    // mkxp-z-3ds: transition quad and scissor box in game coordinates (see GraphicsPrivate; the
+    // scissor box is scaled for ping-pong targets in GLScissorBox::apply)
+    FloatRect screenRect(0, 0, sizeLores.x, sizeLores.y);
+    p->screenQuad.setTexPosRect(screenRect, screenRect);
+    
+    glState.scissorBox.set(IntRect(0, 0, sizeLores.x, sizeLores.y));
+#else
     FloatRect screenRect(0, 0, width, height);
     p->screenQuad.setTexPosRect(screenRect, screenRect);
     
     glState.scissorBox.set(IntRect(0, 0, p->scRes.x, p->scRes.y));
+#endif
     
     shState->eThread().requestWindowResize(width, height);
 }

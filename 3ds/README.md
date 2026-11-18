@@ -50,11 +50,10 @@ involved.
     `Graphics.snap_to_bitmap`;
   - `blt` with opacity: exact on transparent and opaque destination pixels, approximated on
     semi-transparent ones (the TEV cannot divide);
-  - tone and color of sprites and tilemaps: each TEV stage clamps, so a tone that saturates a
-    channel is clamped before the color is mixed in (GLSL clamps only at the end; differs only
-    with both a strong tone and a color/flash);
   - sprites, planes and tilemap layers: opacity, color, tone incl. gray, sprite bush (geometry
-    split on the CPU at the bush line) and invert, plane flash; autotile animation, window
+    split on the CPU at the bush line) and invert, plane flash. Each TEV stage clamps, unlike
+    GLSL, so the color/flash mixes come before the tone (scaled by what the mixes leave), which
+    gives GLSL's result; autotile animation, window
     contents, tilemap flashes, plain textures, flat and vertex colors;
   - viewport and screen effects (tone incl. gray, color, flash, brightness);
   - `Graphics.transition`, plain and with a transition image (the threshold ramp is scaled in
