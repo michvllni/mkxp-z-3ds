@@ -32,7 +32,6 @@
 #include "exception.h"
 #include "gl-fun.h"
 #include "keybindings.h"
-#include "platform3ds.h"
 #include "rb3ds.h"
 #include "sharedstate.h"
 
@@ -93,6 +92,7 @@ int main(int argc, char *argv[]) {
 	int status = 0;
 	bool stuck = false;
 	std::string error;
+	std::string argv0; // outlives the RGSS thread (stuck case: until the process ends)
 	if (chdir(gameDir) != 0) error = std::string("cannot enter the game directory ") + gameDir;
 
 	SDL_SetMainReady();
@@ -103,51 +103,56 @@ int main(int argc, char *argv[]) {
 		// argument is handled above.
 		// argv[0] must be a path: PhysFS derives its base directory from it. Loaders that start
 		// the app without arguments (Azahar, some launchers) get one inside the game directory.
-		std::string argv0 = (argc > 0 && argv[0] && strchr(argv[0], '/')) ? argv[0]
-		                                                                    : std::string(gameDir) + "/mkxp-z.3dsx";
+		argv0 = (argc > 0 && argv[0] && strchr(argv[0], '/')) ? argv[0] : std::string(gameDir) + "/mkxp-z.3dsx";
 		char *configArgv[] = {&argv0[0], nullptr};
-		Config conf;
+		// Heap objects: if the RGSS thread does not stop, it still uses them, so they are leaked
+		// rather than destroyed under it (the process ends right after the error screen).
+		Config *conf = new Config;
 		try {
-			conf.read(1, configArgv);
+			conf->read(1, configArgv);
 		} catch (const Exception &exc) {
 			error = exc.msg;
 		}
+		EventThread *eventThread = nullptr;
+		RGSSThreadData *rtData = nullptr;
 		if (error.empty()) {
 			IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
 			TTF_Init();
-			EventThread eventThread;
-			RGSSThreadData rtData(&eventThread, configArgv[0], nullptr, nullptr, 60, 1, conf, nullptr);
-			rtData.windowSizeMsg.post(Vec2i(400, 240));
-			rtData.drawableSizeMsg.post(Vec2i(400, 240));
-			rtData.bindingUpdateMsg.post(loadBindings(conf));
+			eventThread = new EventThread;
+			rtData = new RGSSThreadData(eventThread, configArgv[0], nullptr, nullptr, 60, 1, *conf, nullptr);
+			rtData->windowSizeMsg.post(Vec2i(400, 240));
+			rtData->drawableSizeMsg.post(Vec2i(400, 240));
+			rtData->bindingUpdateMsg.post(loadBindings(*conf));
 
 			s32 prio = 0x30;
 			svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
-			Thread rgss = threadCreate(rgssThreadFun, &rtData, RGSS_STACK_SIZE, prio + 1, -2, false);
+			Thread rgss = threadCreate(rgssThreadFun, rtData, RGSS_STACK_SIZE, prio + 1, -2, false);
 			if (!rgss) {
 				error = "cannot create the RGSS thread";
 			} else {
-				eventThread.process(rtData);
-				rtData.rqTerm.set();
+				eventThread->process(*rtData);
+				rtData->rqTerm.set();
 				// Wait up to 10 s for the RGSS thread to acknowledge (as upstream).
-				for (int i = 0; i < 1000 && !rtData.rqTermAck; ++i) svcSleepThread(10 * 1000 * 1000LL);
-				if (rtData.rqTermAck) {
+				for (int i = 0; i < 1000 && !rtData->rqTermAck; ++i) svcSleepThread(10 * 1000 * 1000LL);
+				if (rtData->rqTermAck) {
 					threadJoin(rgss, U64_MAX);
 					threadFree(rgss);
 				} else {
 					error = "the RGSS script seems to be stuck";
 					stuck = true;
 				}
-				// Initialisation error, else the last message box (uncaught Ruby error, print)
-				if (error.empty()) error = rtData.rgssErrorMsg;
-				if (error.empty()) error = platform3ds::lastMessage();
-			}
-			if (!stuck) {
-				TTF_Quit();
-				IMG_Quit();
+				// Initialisation error or uncaught Ruby error (set in showExc)
+				if (error.empty()) error = rtData->rgssErrorMsg;
 			}
 		}
-		if (!stuck) SDL_Quit();
+		if (!stuck) {
+			delete rtData;
+			delete eventThread;
+			delete conf;
+			TTF_Quit();
+			IMG_Quit();
+			SDL_Quit();
+		}
 	}
 
 	if (!error.empty()) {

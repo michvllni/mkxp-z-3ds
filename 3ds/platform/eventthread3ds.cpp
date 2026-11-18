@@ -8,13 +8,11 @@
 #include "eventthread.h"
 
 #include <3ds.h>
-#include <SDL_atomic.h>
 #include <SDL_mutex.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "debugwriter.h"
-#include "platform3ds.h"
 #include "sharedstate.h"
 
 uint8_t EventThread::keyStates[];
@@ -64,7 +62,6 @@ EventThread::~EventThread() { SDL_DestroyMutex(textInputLock); }
 // Main-thread loop: input once per vertical blank until the RGSS thread is asked to stop
 // (APT exit request) or has finished (rqTermAck).
 void EventThread::process(RGSSThreadData &rtData) {
-	platform3ds::installAptHook(rtData);
 	memset(&controllerState, 0, sizeof controllerState);
 	memset(keyStates, 0, sizeof keyStates);
 	while (!rtData.rqTermAck) {
@@ -85,7 +82,7 @@ void EventThread::process(RGSSThreadData &rtData) {
 		controllerState = next; // read by the RGSS thread in Input::update
 		gspWaitForVBlank();
 	}
-	platform3ds::removeAptHook();
+	rtData.syncPoint.resumeThreads(); // as upstream: never leave the RGSS thread halted
 }
 
 void EventThread::cleanup() {}
@@ -105,56 +102,13 @@ bool EventThread::getShowCursor() const { return false; }
 bool EventThread::getControllerConnected() const { return true; }
 SDL_GameController *EventThread::controller() const { return nullptr; }
 
-// RGSS `print`/`msgbox` and uncaught Ruby errors: logged to stderr (3dslink or the stderr file),
-// printed on the bottom-screen console and kept for main()'s exit screen. Unlike upstream it does
-// not block until dismissed: a blocking box needs the renderer (PLAN §3.1 "Safety").
-static SDL_SpinLock messageLock = 0;
-static std::string lastMessageText;
-
+// RGSS `print`/`msgbox`: logged to stderr (3dslink or the stderr file) and printed on the
+// bottom-screen console. Unlike upstream it does not block until dismissed: a blocking box needs the
+// renderer (PLAN §3.1 "Safety"). Uncaught Ruby errors also go to rgssErrorMsg (hook in
+// binding-mri.cpp showExc), which main() shows when the game has ended.
 void EventThread::showMessageBox(const char *body, int) {
 	fprintf(stderr, "[msgbox] %s\n", body);
 	printf("%s\n", body);
-	SDL_AtomicLock(&messageLock);
-	lastMessageText = body;
-	SDL_AtomicUnlock(&messageLock);
-}
-
-std::string platform3ds::lastMessage() {
-	SDL_AtomicLock(&messageLock);
-	std::string text = lastMessageText;
-	SDL_AtomicUnlock(&messageLock);
-	return text;
-}
-
-// APT hook: HOME menu / sleep pause the RGSS thread: haltThreads waits until it reaches its next
-// Graphics.update and parks it there until resumed (as upstream does when the window goes to the
-// background). Long script work without Graphics.update delays the suspend accordingly. Nothing
-// to halt once the RGSS thread has finished.
-static aptHookCookie aptCookie;
-static bool aptHooked;
-
-static void aptHookFun(APT_HookType hook, void *param) {
-	RGSSThreadData *rtData = static_cast<RGSSThreadData *>(param);
-	switch (hook) {
-	case APTHOOK_ONSUSPEND:
-	case APTHOOK_ONSLEEP:
-		if (!rtData->rqTermAck) rtData->syncPoint.haltThreads();
-		break;
-	case APTHOOK_ONRESTORE:
-	case APTHOOK_ONWAKEUP: rtData->syncPoint.resumeThreads(); break;
-	case APTHOOK_ONEXIT: rtData->syncPoint.resumeThreads(); break; // let it see rqTerm
-	default: break;
-	}
-}
-
-void platform3ds::installAptHook(RGSSThreadData &rtData) {
-	aptHook(&aptCookie, aptHookFun, &rtData);
-	aptHooked = true;
-}
-
-void platform3ds::removeAptHook() {
-	if (aptHooked) aptUnhook(&aptCookie);
-	aptHooked = false;
 }
 
 void EventThread::notifyFrame() {}
@@ -164,9 +118,12 @@ void EventThread::lockText(bool lock) {
 	lock ? SDL_LockMutex(textInputLock) : SDL_UnlockMutex(textInputLock);
 }
 
-// SyncPoint: unchanged from upstream src/eventthread.cpp (mkxp-z, GPL-2.0-or-later). The APT
-// hook above halts the RGSS thread at its next Graphics.update while the HOME menu or sleep mode
-// owns the console and resumes it afterwards.
+// SyncPoint: from upstream src/eventthread.cpp (mkxp-z, GPL-2.0-or-later); Util::unlock signals
+// with the mutex held (upstream does not, which can lose a wakeup). Nothing halts the RGSS thread
+// on the 3DS yet: HOME menu and sleep are handled by APT on the main thread, and with no
+// rendering there is nothing to protect. Halting in an APT hook would block HOME/sleep until the
+// next Graphics.update (forever once the script has ended); the renderer will stop drawing on
+// suspend instead.
 void SyncPoint::haltThreads() {
 	if (mainSync.locked) return;
 	reply.lock(); // lock the reply sync first to avoid races
@@ -206,11 +163,13 @@ SyncPoint::Util::~Util() {
 void SyncPoint::Util::lock() { locked.set(); }
 
 void SyncPoint::Util::unlock(bool multi) {
+	SDL_LockMutex(mut);
 	locked.clear();
 	if (multi)
 		SDL_CondBroadcast(cond);
 	else
 		SDL_CondSignal(cond);
+	SDL_UnlockMutex(mut);
 }
 
 void SyncPoint::Util::waitForUnlock() {
