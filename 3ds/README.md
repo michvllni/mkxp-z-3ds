@@ -49,7 +49,8 @@ involved.
   - `binding/binding-mri.cpp`: `System.platform` returns "Nintendo 3DS".
   - `src/display/graphics.cpp`: movie playback (Theora + OpenAL) is left out;
     `Graphics.play_movie` logs and returns, as if the movie had ended.
-  - `src/input/input.cpp`: `Input.controller_name` returns "Nintendo 3DS".
+  - `src/input/input.cpp`: `Input::Controller.name` returns "Nintendo 3DS".
+  - `binding/binding-mri.cpp` `showExc`: the uncaught-error text also goes to `rgssErrorMsg`.
 - **MIDI:** fluidsynth is loaded at run time as on desktop. That fails on the 3DS, so MIDI is
   disabled.
 
@@ -74,13 +75,17 @@ involved.
 - **Logs and messages:**
   - Without 3dslink, stderr (Ruby errors, `Debug()` output, `print`/`msgbox` text) goes to
     `sdmc:/rmxp3ds/mkxp-stderr.txt`.
-  - Message boxes are printed on the bottom-screen console and do not block. A blocking box needs
-    the renderer.
-  - When the game ends with an error, or after a message box (e.g. an uncaught Ruby exception),
-    the message stays on the bottom screen until START is pressed. With
-    `sdmc:/rmxp3ds/test/autoexit` it exits after 3 s.
-- **HOME menu and sleep mode** pause the game at its next `Graphics.update` (APT hook,
-  `SyncPoint`).
+  - Message boxes (`print`, `msgbox`) are printed on the bottom-screen console and do not block. A
+    blocking box needs the renderer.
+  - When the game ends with an error (initialisation error, uncaught Ruby exception: hook in
+    `showExc`), the message stays on the bottom screen until START is pressed. With
+    `sdmc:/rmxp3ds/test/autoexit` it exits after 3 s. If the RGSS thread does not stop within
+    10 s, the app shows that and ends the process without tearing down state the thread still
+    uses.
+- **HOME menu and sleep mode** are handled by APT on the main thread. The game is not paused: with
+  no rendering there is nothing to protect. Halting the RGSS thread from an APT hook would block
+  HOME/sleep until its next `Graphics.update`; the renderer will stop drawing while suspended
+  instead.
 
 ## Known limitations (this stage)
 - **No picture yet:** the GL function table does not draw. Bitmap pixel reads (`get_pixel`) return
