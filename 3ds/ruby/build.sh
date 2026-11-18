@@ -118,7 +118,9 @@ arm-none-eabi-ar rcs "$BUILD/shim/librb3dsshim.a" "$BUILD/shim/rb3ds_shim.o"
 # USE_THREAD_CACHE=0: a reused native thread skips native_thread_create, which is where the
 # 3DS learns a thread's stack size (patch 0001); also frees thread stacks at once.
 # ASFLAGS: Ruby assembles .S files with ASFLAGS only (ARCH_FLAG is empty when cross-compiling);
-# -mfpu=vfp is the ARM11 MPCore's VFPv2. ac_cv_*: features newlib declares but the 3DS lacks.
+# -mfpu=vfp is the ARM11 MPCore's VFPv2. ac_cv_*: features newlib declares but the 3DS lacks;
+# fcntl=no: libctru's fcntl() only handles sockets (ENOTSOCK on files), e.g. `load` opens files
+# O_NONBLOCK and clears it with F_SETFL.
 CFLAGS_3DS="-std=gnu17 ${ARCH_FLAGS[*]} -ffunction-sections -fdata-sections -O2 -D__3DS__ -D_GNU_SOURCE \
 -DTRANSIENT_HEAP_TOTAL_SIZE=0x400000 -DUSE_THREAD_CACHE=0 \
 -I$HERE/shim/include -include rb3ds_compat.h \
@@ -136,6 +138,7 @@ CONF_ARGS=(
       LDFLAGS="-specs=3dsx.specs -L$BUILD/shim -L$DEVKITPRO/libctru/lib -L$DEVKITPRO/portlibs/3ds/lib"
       LIBS="-lrb3dsshim -lctru -lm"
       ac_cv_func_fork=no ac_cv_func_vfork=no
+      ac_cv_func_fcntl=no
       ac_cv_func_mmap=no ac_cv_header_sys_mman_h=no
       ac_cv_func_sigaction=no ac_cv_func_sigaltstack=no ac_cv_func_getcontext=no
       ac_cv_func_dlopen=no ac_cv_lib_dl_dlopen=no

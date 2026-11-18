@@ -33,7 +33,8 @@ calls `RUBY_INIT_STACK`: with main()'s stack, give it a large stack
 - `-std=gnu17` (Ruby 3.1 predates C23), `-D_GNU_SOURCE` (newlib declares e.g. `memrchr` only
   then), `TRANSIENT_HEAP_TOTAL_SIZE` 4 MiB instead of 32 MiB, `USE_THREAD_CACHE=0`.
 - `ac_cv_*` overrides for what newlib declares but the 3DS lacks (fork, mmap, sigaction,
-  dlopen, ...); `rb_cv_binary_elf=no` (no addr2line/dladdr).
+  dlopen, ...); `ac_cv_func_fcntl=no` (libctru's `fcntl` only handles sockets; `load` would
+  fail with ENOTSOCK clearing `O_NONBLOCK`); `rb_cv_binary_elf=no` (no addr2line/dladdr).
 
 ## Patches (`patches/`, applied in order)
 | Patch | Why |
