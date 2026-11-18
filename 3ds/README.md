@@ -53,7 +53,8 @@ involved.
   - sprites, planes and tilemap layers: opacity, color, tone incl. gray, sprite bush (geometry
     split on the CPU at the bush line) and invert, plane flash. Each TEV stage clamps, unlike
     GLSL, so the color/flash mixes come before the tone (scaled by what the mixes leave), which
-    gives GLSL's result; autotile animation, window
+    gives GLSL's result. Exception: gray together with a color (or plane color and flash) and a
+    tone beyond ±127 per channel exceeds the six TEV stages; the tone is then limited to ±127; autotile animation, window
     contents, tilemap flashes, plain textures, flat and vertex colors;
   - viewport and screen effects (tone incl. gray, color, flash, brightness);
   - `Graphics.transition`, plain and with a transition image (the threshold ramp is scaled in

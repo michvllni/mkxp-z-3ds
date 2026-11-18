@@ -473,11 +473,14 @@ void applyViewportScissor(bool screen, bool scissorOn, const Tex *target, bool f
 		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 		return;
 	}
-	const GLint *s = st.scissor;
+	// box clamped to the target (the PICA takes unsigned coordinates)
+	const GLint tw = screen ? 400 : target->pw, th = screen ? 240 : target->ph;
+	const GLint x0 = std::min(std::max(st.scissor[0], 0), tw), y0 = std::min(std::max(st.scissor[1], 0), th);
+	const GLint x1 = std::min(std::max(st.scissor[0] + st.scissor[2], x0), tw), y1 = std::min(std::max(st.scissor[1] + st.scissor[3], y0), th);
 	if (screen)
-		C3D_SetScissor(GPU_SCISSOR_NORMAL, s[1], 400 - (s[0] + s[2]), s[1] + s[3], 400 - s[0]);
+		C3D_SetScissor(GPU_SCISSOR_NORMAL, y0, 400 - x1, y1, 400 - x0);
 	else
-		C3D_SetScissor(GPU_SCISSOR_NORMAL, s[0], s[1], s[0] + s[2], s[1] + s[3]);
+		C3D_SetScissor(GPU_SCISSOR_NORMAL, x0, y0, x1, y1);
 }
 
 u32 packColor(const float *c) {
@@ -572,6 +575,13 @@ void effectChain(float gray, const float *tone, float opacity, const float *colo
 		C3D_TexEnvColor(e, packColor(mixes[i]));
 	}
 	const GPU_TEVOP_RGB prevOp = invert ? GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR : GPU_TEVOP_RGB_SRC_COLOR;
+	if (hasTone && !small && s + 2 > 6) {
+		// no room for the add and the subtract stage: one ADD_SIGNED stage with the tone clamped
+		// to +-0.5 keeps both signs (error only beyond +-0.5)
+		warnOnce("sprite effects: tone limited to +-0.5 (gray + color/flash use the other TEV stages)");
+		for (float &v : t) v = std::min(std::max(v, -127.0f / 255.0f), 127.0f / 255.0f);
+		small = true;
+	}
 	if (hasTone && small) {
 		// ADD_SIGNED: prev + c - 0.5 with c = 0.5 + t (inverted: (1 - prev) + 0.5 - t)
 		if (!(e = stage())) return;
