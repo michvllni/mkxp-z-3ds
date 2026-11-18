@@ -40,14 +40,19 @@ involved.
   - **`glClear`** draws a quad over the whole target, so the scissor applies.
   - **GPU synchronisation:** draws are queued per citro3d frame. Each texture remembers the last
     frame that used it; uploads, CPU clears and `ReadPixels` wait for the GPU only when that
-    frame has not finished. Deleted objects are freed once the GPU is done with them. A full
-    vertex ring or command buffer submits the frame early.
+    frame has not finished; a busy linear texture gets new memory instead of waiting. Deleted
+    objects are freed once the GPU is done with them (or right away after a wait when memory is
+    short). A full vertex ring or command buffer submits the frame early, without showing the
+    partly drawn top screen.
 
   **Works:**
   - textures, render targets, clear/`fill_rect`, `draw_text`, `get_pixel`,
     `Graphics.snap_to_bitmap`;
   - `blt` with opacity: exact on transparent and opaque destination pixels, approximated on
     semi-transparent ones (the TEV cannot divide);
+  - tone and color of sprites and tilemaps: each TEV stage clamps, so a tone that saturates a
+    channel is clamped before the color is mixed in (GLSL clamps only at the end; differs only
+    with both a strong tone and a color/flash);
   - sprites and tilemap layers (opacity, color, tone without gray), autotile animation, window
     contents, tilemap flashes, plain textures, flat and vertex colors;
   - presenting to the top screen.

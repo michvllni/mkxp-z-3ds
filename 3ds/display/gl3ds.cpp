@@ -246,8 +246,12 @@ void freeDeferred() {
 }
 
 // Submits the frame being built (C3D_FrameEnd only queues it; the GPU runs it asynchronously).
-void endFrame() {
+// C3D_FrameEnd also copies the top screen target to the display if it was drawn into: only
+// gl3dsPresent submits with present; early submits (full buffers, syncs) skip that copy, the
+// content stays in the target until the frame is presented.
+void endFrame(bool present = false) {
 	if (!st.inFrame) return;
+	if (!present && st.top) st.top->used = false;
 	C3D_FrameEnd(0); // also flushes the CPU data cache of the linear heap (vertices, textures)
 	st.inFrame = false;
 	st.frameSerial++;
@@ -292,11 +296,39 @@ Tex *texture(GLuint name) {
 	return it == st.textures.end() ? nullptr : &it->second;
 }
 
+// Allocates a linear-memory texture. If memory is short while deferred deletions or unfinished
+// frames hold memory, waits for the GPU (which frees them) and tries again.
+bool allocLinear(C3D_Tex *out, u16 pw, u16 ph) {
+	if (C3D_TexInit(out, pw, ph, GPU_RGBA8)) return true;
+	if (st.deadTextures.empty() && st.deadTargets.empty()) return false;
+	syncGpu();
+	return C3D_TexInit(out, pw, ph, GPU_RGBA8);
+}
+
+// Before the CPU writes a texture: if a frame that used it may still be running, a linear texture
+// gets new memory (the GPU never writes linear textures; the old memory is freed once the GPU is
+// done, keepContent copies it first), so the CPU does not wait. VRAM textures (render targets)
+// wait for the GPU.
+void prepareCpuWrite(Tex &t, bool keepContent) {
+	if (t.useSerial <= st.completedSerial) return;
+	if (!t.inVram) {
+		C3D_Tex fresh;
+		if (C3D_TexInit(&fresh, t.pw, t.ph, GPU_RGBA8)) {
+			if (keepContent) memcpy(fresh.data, t.tex.data, t.tex.size);
+			st.deadTextures.push_back(t.tex);
+			t.tex = fresh;
+			t.useSerial = 0;
+			return;
+		}
+	}
+	syncGpu();
+}
+
 // Moves a VRAM texture back to linear memory (GPU idle, outside a frame). False if linear memory
 // is full.
 bool evictToLinear(Tex &t) {
 	C3D_Tex lin;
-	if (!C3D_TexInit(&lin, t.pw, t.ph, GPU_RGBA8)) return false;
+	if (!allocLinear(&lin, t.pw, t.ph)) return false;
 	GSPGPU_InvalidateDataCache(t.tex.data, t.tex.size); // written by the GPU
 	memcpy(lin.data, t.tex.data, t.tex.size);
 	C3D_TexFlush(&lin);
@@ -312,7 +344,13 @@ bool evictToLinear(Tex &t) {
 // to linear memory until it fits. May submit and wait for the queued frame (leaves no frame open).
 bool allocVram(Tex &need, C3D_Tex *out) {
 	if (C3D_TexInitVRAM(out, need.pw, need.ph, GPU_RGBA8)) return true;
-	syncGpu(); // queued draws may still use the textures that get evicted
+	syncGpu(); // frees deferred VRAM; queued draws may still use the textures that get evicted
+	if (C3D_TexInitVRAM(out, need.pw, need.ph, GPU_RGBA8)) return true;
+	// Give up early if evicting every other VRAM texture could not make enough room.
+	size_t reclaimable = vramSpaceFree();
+	for (auto &kv : st.textures)
+		if (kv.second.allocated && kv.second.inVram && &kv.second != &need) reclaimable += kv.second.tex.size;
+	if (reclaimable < (size_t)need.pw * need.ph * 4) return false;
 	for (;;) {
 		Tex *victim = nullptr;
 		for (auto &kv : st.textures) {
@@ -364,7 +402,6 @@ C3D_RenderTarget *currentTarget(bool *screen, Tex **texOut) {
 // Clears a texture that is still in linear memory on the CPU (scissor box if enabled), so that
 // creating and filling a bitmap does not move it to VRAM.
 void cpuClear(Tex &t, const float *color) {
-	syncIfUsed(t);
 	GLint x0 = 0, y0 = 0, x1 = t.w, y1 = t.h;
 	if (st.scissorTest) {
 		x0 = std::max(x0, st.scissor[0]);
@@ -373,6 +410,7 @@ void cpuClear(Tex &t, const float *color) {
 		y1 = std::min(y1, st.scissor[1] + st.scissor[3]);
 	}
 	if (x0 >= x1 || y0 >= y1) return;
+	prepareCpuWrite(t, !(x0 == 0 && y0 == 0 && x1 == t.w && y1 == t.h));
 	auto b = [](float v) { return (uint8_t)(std::min(std::max(v, 0.0f), 1.0f) * 255.0f + 0.5f); };
 	const uint8_t px[4] = {b(color[3]), b(color[2]), b(color[1]), b(color[0])}; // A B G R
 	uint8_t *dst = (uint8_t *)t.tex.data;
@@ -932,7 +970,7 @@ void APIENTRY texImage2D(GLenum, GLint, GLint, GLsizei w, GLsizei h, GLint, GLen
 	}
 	if (!t->allocated) {
 		t->pw = pow2(w), t->ph = pow2(h);
-		if (!C3D_TexInit(&t->tex, t->pw, t->ph, GPU_RGBA8)) {
+		if (!allocLinear(&t->tex, t->pw, t->ph)) {
 			warnOnce("out of linear memory for textures");
 			return;
 		}
@@ -940,7 +978,7 @@ void APIENTRY texImage2D(GLenum, GLint, GLint, GLsizei w, GLsizei h, GLint, GLen
 		t->inVram = false;
 		t->useSerial = 0;
 	} else {
-		syncIfUsed(*t); // same size: rewritten in place, after the draws that use the old content
+		prepareCpuWrite(*t, false); // same size: draws queued before keep the old content
 	}
 	memset(t->tex.data, 0, t->tex.size);
 	if (data) uploadRect(*t, 0, 0, w, h, (const uint8_t *)data, format);
@@ -951,7 +989,7 @@ void APIENTRY texSubImage2D(GLenum, GLint, GLint x, GLint y, GLsizei w, GLsizei 
 	Tex *t = texture(st.boundTex[st.activeUnit]);
 	if (!t || !t->allocated || !data) return;
 	if (x < 0 || y < 0 || x + w > t->w || y + h > t->h) return;
-	syncIfUsed(*t); // draws queued before must see the old content
+	prepareCpuWrite(*t, true); // draws queued before must see the old content
 	uploadRect(*t, x, y, w, h, (const uint8_t *)data, format);
 	C3D_TexFlush(&t->tex);
 }
@@ -1132,7 +1170,7 @@ void APIENTRY bindVertexArray(GLuint a) { st.boundVertexArray = a; }
 void gl3dsPresent() {
 	beginFrame(); // a frame with nothing drawn still shows the (cleared) screen
 	C3D_FrameDrawOn(st.top);
-	endFrame(); // submitted; deferred deletions wait for the GPU (next beginFrame)
+	endFrame(true); // submitted; deferred deletions wait for the GPU (next beginFrame)
 }
 
 // Fills `gl`. Entries the 3DS does not provide stay null, which mkxp-z checks for:
