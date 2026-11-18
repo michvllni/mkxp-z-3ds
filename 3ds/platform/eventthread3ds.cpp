@@ -8,11 +8,13 @@
 #include "eventthread.h"
 
 #include <3ds.h>
+#include <SDL_atomic.h>
 #include <SDL_mutex.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "debugwriter.h"
+#include "platform3ds.h"
 #include "sharedstate.h"
 
 uint8_t EventThread::keyStates[];
@@ -39,7 +41,7 @@ const ButtonMap buttonMap[] = {
 	{KEY_ZR, SDL_CONTROLLER_BUTTON_RIGHTSTICK},
 	{KEY_START, SDL_CONTROLLER_BUTTON_START},
 	{KEY_SELECT, SDL_CONTROLLER_BUTTON_BACK},
-	// D-pad and circle pad both count as the D-pad (RGSS has no analog movement).
+	// libctru's KEY_UP etc. are D-pad | circle pad: both move (RGSS has no analog movement).
 	{KEY_UP, SDL_CONTROLLER_BUTTON_DPAD_UP},
 	{KEY_DOWN, SDL_CONTROLLER_BUTTON_DPAD_DOWN},
 	{KEY_LEFT, SDL_CONTROLLER_BUTTON_DPAD_LEFT},
@@ -62,6 +64,7 @@ EventThread::~EventThread() { SDL_DestroyMutex(textInputLock); }
 // Main-thread loop: input once per vertical blank until the RGSS thread is asked to stop
 // (APT exit request) or has finished (rqTermAck).
 void EventThread::process(RGSSThreadData &rtData) {
+	platform3ds::installAptHook(rtData);
 	memset(&controllerState, 0, sizeof controllerState);
 	memset(keyStates, 0, sizeof keyStates);
 	while (!rtData.rqTermAck) {
@@ -79,14 +82,10 @@ void EventThread::process(RGSSThreadData &rtData) {
 		hidCircleRead(&cp);
 		next.axes[SDL_CONTROLLER_AXIS_LEFTX] = scaleAxis(cp.dx);
 		next.axes[SDL_CONTROLLER_AXIS_LEFTY] = -scaleAxis(cp.dy); // SDL: down is positive
-		// Circle pad as D-pad beyond a third of its range.
-		if (cp.dy > 50) next.buttons[SDL_CONTROLLER_BUTTON_DPAD_UP] = true;
-		if (cp.dy < -50) next.buttons[SDL_CONTROLLER_BUTTON_DPAD_DOWN] = true;
-		if (cp.dx < -50) next.buttons[SDL_CONTROLLER_BUTTON_DPAD_LEFT] = true;
-		if (cp.dx > 50) next.buttons[SDL_CONTROLLER_BUTTON_DPAD_RIGHT] = true;
 		controllerState = next; // read by the RGSS thread in Input::update
 		gspWaitForVBlank();
 	}
+	platform3ds::removeAptHook();
 }
 
 void EventThread::cleanup() {}
@@ -106,10 +105,56 @@ bool EventThread::getShowCursor() const { return false; }
 bool EventThread::getControllerConnected() const { return true; }
 SDL_GameController *EventThread::controller() const { return nullptr; }
 
-// RGSS `print`/`msgbox`: logged to stderr (3dslink or the stderr file). A blocking message box on
-// the bottom screen comes with the error screen (PLAN §3.1 "Safety").
+// RGSS `print`/`msgbox` and uncaught Ruby errors: logged to stderr (3dslink or the stderr file),
+// printed on the bottom-screen console and kept for main()'s exit screen. Unlike upstream it does
+// not block until dismissed: a blocking box needs the renderer (PLAN §3.1 "Safety").
+static SDL_SpinLock messageLock = 0;
+static std::string lastMessageText;
+
 void EventThread::showMessageBox(const char *body, int) {
 	fprintf(stderr, "[msgbox] %s\n", body);
+	printf("%s\n", body);
+	SDL_AtomicLock(&messageLock);
+	lastMessageText = body;
+	SDL_AtomicUnlock(&messageLock);
+}
+
+std::string platform3ds::lastMessage() {
+	SDL_AtomicLock(&messageLock);
+	std::string text = lastMessageText;
+	SDL_AtomicUnlock(&messageLock);
+	return text;
+}
+
+// APT hook: HOME menu / sleep pause the RGSS thread: haltThreads waits until it reaches its next
+// Graphics.update and parks it there until resumed (as upstream does when the window goes to the
+// background). Long script work without Graphics.update delays the suspend accordingly. Nothing
+// to halt once the RGSS thread has finished.
+static aptHookCookie aptCookie;
+static bool aptHooked;
+
+static void aptHookFun(APT_HookType hook, void *param) {
+	RGSSThreadData *rtData = static_cast<RGSSThreadData *>(param);
+	switch (hook) {
+	case APTHOOK_ONSUSPEND:
+	case APTHOOK_ONSLEEP:
+		if (!rtData->rqTermAck) rtData->syncPoint.haltThreads();
+		break;
+	case APTHOOK_ONRESTORE:
+	case APTHOOK_ONWAKEUP: rtData->syncPoint.resumeThreads(); break;
+	case APTHOOK_ONEXIT: rtData->syncPoint.resumeThreads(); break; // let it see rqTerm
+	default: break;
+	}
+}
+
+void platform3ds::installAptHook(RGSSThreadData &rtData) {
+	aptHook(&aptCookie, aptHookFun, &rtData);
+	aptHooked = true;
+}
+
+void platform3ds::removeAptHook() {
+	if (aptHooked) aptUnhook(&aptCookie);
+	aptHooked = false;
 }
 
 void EventThread::notifyFrame() {}
@@ -119,9 +164,9 @@ void EventThread::lockText(bool lock) {
 	lock ? SDL_LockMutex(textInputLock) : SDL_UnlockMutex(textInputLock);
 }
 
-// SyncPoint: unchanged from upstream src/eventthread.cpp (mkxp-z, GPL-2.0-or-later). The main
-// thread can halt the RGSS thread at its next Graphics.update (e.g. while the HOME menu owns the
-// GPU) and resume it afterwards.
+// SyncPoint: unchanged from upstream src/eventthread.cpp (mkxp-z, GPL-2.0-or-later). The APT
+// hook above halts the RGSS thread at its next Graphics.update while the HOME menu or sleep mode
+// owns the console and resumes it afterwards.
 void SyncPoint::haltThreads() {
 	if (mainSync.locked) return;
 	reply.lock(); // lock the reply sync first to avoid races

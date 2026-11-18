@@ -32,6 +32,7 @@
 #include "exception.h"
 #include "gl-fun.h"
 #include "keybindings.h"
+#include "platform3ds.h"
 #include "rb3ds.h"
 #include "sharedstate.h"
 
@@ -83,7 +84,6 @@ int main(int argc, char *argv[]) {
 	gfxInitDefault();
 	PrintConsole bottom;
 	consoleInit(GFX_BOTTOM, &bottom);
-	romfsInit();
 	mkdir("sdmc:/rmxp3ds", 0777);
 	u32 *socBuffer = connect3dslink();
 	if (!socBuffer && freopen(STDERR_FILE, "w", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
@@ -91,19 +91,14 @@ int main(int argc, char *argv[]) {
 	const char *gameDir = (argc > 1 && argv[1] && argv[1][0]) ? argv[1] : DEFAULT_GAME_DIR;
 	printf("mkxp-z-3ds %s\ngame: %s\n", MKXPZ_VERSION, gameDir);
 	int status = 0;
-	if (chdir(gameDir) != 0) {
-		fprintf(stderr, "mkxp-z-3ds: cannot enter game directory %s\n", gameDir);
-		status = 1;
-	}
+	bool stuck = false;
+	std::string error;
+	if (chdir(gameDir) != 0) error = std::string("cannot enter the game directory ") + gameDir;
 
 	SDL_SetMainReady();
-	if (status == 0 && SDL_Init(SDL_INIT_TIMER) < 0) {
-		fprintf(stderr, "mkxp-z-3ds: SDL_Init: %s\n", SDL_GetError());
-		status = 1;
-	}
+	if (error.empty() && SDL_Init(SDL_INIT_TIMER) < 0) error = std::string("SDL_Init: ") + SDL_GetError();
 
-	std::string error;
-	if (status == 0) {
+	if (error.empty()) {
 		// Config::read only looks at argv[1..] for "debug"/"test"/"btest"; the game directory
 		// argument is handled above.
 		// argv[0] must be a path: PhysFS derives its base directory from it. Loaders that start
@@ -141,18 +136,23 @@ int main(int argc, char *argv[]) {
 					threadFree(rgss);
 				} else {
 					error = "the RGSS script seems to be stuck";
+					stuck = true;
 				}
+				// Initialisation error, else the last message box (uncaught Ruby error, print)
 				if (error.empty()) error = rtData.rgssErrorMsg;
+				if (error.empty()) error = platform3ds::lastMessage();
 			}
-			TTF_Quit();
-			IMG_Quit();
+			if (!stuck) {
+				TTF_Quit();
+				IMG_Quit();
+			}
 		}
-		SDL_Quit();
+		if (!stuck) SDL_Quit();
 	}
 
 	if (!error.empty()) {
 		fprintf(stderr, "mkxp-z-3ds: %s\n", error.c_str());
-		printf("\nError: %s\n\nPress START to exit.\n", error.c_str());
+		printf("\n%s\n\nPress START to exit.\n", error.c_str());
 		bool autoexit = access("sdmc:/rmxp3ds/test/autoexit", F_OK) == 0;
 		for (int frame = 0; aptMainLoop() && !(autoexit && frame > 180); ++frame) {
 			hidScanInput();
@@ -161,12 +161,13 @@ int main(int argc, char *argv[]) {
 		}
 		status = 1;
 	}
+	// A stuck RGSS thread still uses everything below: end the process without tearing down.
+	if (stuck) svcExitProcess();
 
 	if (socBuffer) {
 		socExit();
 		free(socBuffer);
 	}
-	romfsExit();
 	gfxExit();
 	return status;
 }

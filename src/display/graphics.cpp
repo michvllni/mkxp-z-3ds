@@ -1559,7 +1559,10 @@ bool Graphics::updateMovieInput(Movie *movie) {
 
 void Graphics::playMovie(const char *filename, int volume_, bool skippable) {
 #ifdef __3DS__
-    throw Exception(Exception::MKXPError, "Movie playback is not available on the Nintendo 3DS");
+    // No Theora/OpenAL on the 3DS: skip the movie, as if it had ended, so the game continues.
+    Debug() << "Movie playback is not available on the Nintendo 3DS, skipping" << filename;
+    (void)volume_;
+    (void)skippable;
 #else
     if (shState->config().enableHires) {
         Debug() << "BUG: High-res Graphics playMovie not implemented";

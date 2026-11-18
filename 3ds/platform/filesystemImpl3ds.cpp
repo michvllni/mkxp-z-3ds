@@ -43,11 +43,13 @@ std::string filesystemImpl::getCurrentDirectory() {
 	return std::string(buf);
 }
 
-// Lexically normalizes path ('\\' -> '/', removes "." and resolves ".." without going above the
-// root), keeping a device prefix. With absolute, a relative path is joined to the current
-// directory first. preferred has no meaning here ('/' is the only separator).
+// Lexically normalizes path like std::filesystem's lexically_normal ('\\' -> '/', removes "."
+// and resolves ".." without going above the root, keeps a trailing '/', "" stays ""), keeping a
+// device prefix. With absolute, a relative path is joined to the current directory first.
+// preferred has no meaning here ('/' is the only separator).
 std::string filesystemImpl::normalizePath(const char *path, bool, bool absolute) {
 	std::string in(path);
+	if (in.empty() && !absolute) return in;
 	for (char &c : in)
 		if (c == '\\') c = '/';
 	size_t dev = deviceLength(in);
@@ -60,6 +62,9 @@ std::string filesystemImpl::normalizePath(const char *path, bool, bool absolute)
 		rooted = true;
 	}
 	std::string prefix = in.substr(0, dev);
+	// a trailing "/" (or "/." or "/..") names a directory: keep it, as lexically_normal does
+	bool trailingSlash = !in.empty() && (in.back() == '/' || in.size() >= 2 && in.compare(in.size() - 2, 2, "/.") == 0 ||
+	                                     in.size() >= 3 && in.compare(in.size() - 3, 3, "/..") == 0);
 	std::vector<std::string> parts;
 	size_t i = dev;
 	while (i <= in.size()) {
@@ -81,6 +86,7 @@ std::string filesystemImpl::normalizePath(const char *path, bool, bool absolute)
 		if (k) out += '/';
 		out += parts[k];
 	}
+	if (trailingSlash && !parts.empty() && parts.back() != "..") out += '/';
 	if (out.empty()) out = ".";
 	return out;
 }

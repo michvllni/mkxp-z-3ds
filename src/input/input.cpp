@@ -1481,6 +1481,9 @@ bool Input::getControllerConnected()
 
 const char *Input::getControllerName()
 {
+#ifdef __3DS__ // mkxp-z-3ds: the built-in buttons are not an SDL game controller
+    return "Nintendo 3DS";
+#endif
     return (getControllerConnected()) ?
     SDL_GameControllerName(shState->eThread().controller()) :
     0;
