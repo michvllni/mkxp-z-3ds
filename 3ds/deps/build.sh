@@ -9,14 +9,16 @@
 #   RWops, threads, image loading, font rendering; never for video or audio) as static libraries
 #   for the Nintendo 3DS (devkitARM + libctru, devkitPro's CMake toolchain file):
 #     SDL2 2.32.10        video, render, audio, joystick, haptic, sensor, hidapi off
-#     SDL2_image 2.8.12   stb_image backend (PNG, JPG) plus the built-in formats; no AVIF, JXL,
-#                         TIFF, WebP
+#     SDL2_image 2.8.12   PNG and JPEG via libpng and libjpeg(-turbo) from devkitPro's 3DS
+#                         portlibs (not stb_image: half the peak memory for large images), plus
+#                         the built-in formats; no AVIF, JXL, TIFF, WebP
 #     SDL2_ttf 2.24.0     FreeType from devkitPro's 3DS portlibs, no HarfBuzz
 #   Release archives are downloaded from GitHub and checked against the SHA-256 sums below
 #   (SDL2, SDL2_image: GitHub's asset digests; SDL2_ttf: signature by the SDL release key
 #   1528635D8053A57F77D1E08630A59377A7763BE6, checked when pinning).
 #   Output: DIR/prefix/{include,lib} with CMake and pkg-config files. Each library is rebuilt
-#   only when its version or this script changes. Needs DEVKITPRO, cmake, ninja.
+#   only when its version, this script, the compiler, the CMake toolchain file,
+#   libctru or the linked portlibs change. Needs DEVKITPRO, cmake, ninja.
 #
 # OPTIONS
 #   --build-dir DIR     build directory (default: build-3ds/deps in the repository root)
@@ -60,7 +62,13 @@ TOOLCHAIN="$DEVKITPRO/cmake/3DS.cmake"
 DL="${DL:-$BUILD/download}"
 PREFIX="$BUILD/prefix"
 mkdir -p "$BUILD" "$DL" "$PREFIX"
-SCRIPT_ID="$(sha256sum "$0" | cut -d' ' -f1)"
+# Inputs besides the versions: this script, the compiler, the CMake toolchain file, libctru and
+# the portlibs SDL2_image/SDL2_ttf link (libpng, libjpeg, FreeType).
+PORTLIBS="$DEVKITPRO/portlibs/3ds"
+INPUT_ID="$( (sha256sum "$0" "$TOOLCHAIN" "$DEVKITPRO/libctru/lib/libctru.a" \
+  "$PORTLIBS/lib/pkgconfig/libpng.pc" "$PORTLIBS/lib/pkgconfig/libjpeg.pc" \
+  "$PORTLIBS/lib/pkgconfig/freetype2.pc" | cut -d' ' -f1; arm-none-eabi-gcc -dumpfullversion) \
+  | sha256sum | cut -d' ' -f1)"
 
 # fetch NAME URL SHA256: downloads URL to DL/NAME unless present with the right checksum.
 fetch() {
@@ -73,12 +81,12 @@ fetch() {
 }
 
 # build_lib NAME VERSION URL SHA256 CMAKE_ARGS...: unpacks, configures, builds and installs one
-# library into PREFIX; skipped when the stamp matches version and script.
+# library into PREFIX; skipped when the stamp matches version and inputs and the library exists.
 build_lib() {
   local name="$1" version="$2" url="$3" sum="$4"
   shift 4
-  local archive="$name-$version.tar.gz" stamp="$BUILD/.$name.stamp" id="$version $SCRIPT_ID"
-  if [ "$(cat "$stamp" 2>/dev/null || true)" = "$id" ]; then
+  local archive="$name-$version.tar.gz" stamp="$BUILD/.$name.stamp" id="$version $INPUT_ID"
+  if [ "$(cat "$stamp" 2>/dev/null || true)" = "$id" ] && [ -f "$PREFIX/lib/lib$name.a" ]; then
     echo "$name $version: up to date"
     return
   fi
@@ -97,21 +105,24 @@ build_lib() {
   echo "$name $version: installed"
 }
 
-# SDL2 first: the other two find it through CMAKE_PREFIX_PATH. A rebuilt SDL2 invalidates them.
-SDL_STAMP_BEFORE="$(cat "$BUILD/.SDL2.stamp" 2>/dev/null || true)"
-build_lib SDL2 2.32.10 \
-  https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz \
+# SDL2 first: the other two find it through CMAKE_PREFIX_PATH. When SDL2 must be rebuilt, the
+# whole prefix is cleared (no stale headers, CMake or pkg-config files of an older version) and the
+# other two are rebuilt as well.
+SDL2_VERSION=2.32.10
+if [ "$(cat "$BUILD/.SDL2.stamp" 2>/dev/null || true)" != "$SDL2_VERSION $INPUT_ID" ] || [ ! -f "$PREFIX/lib/libSDL2.a" ]; then
+  rm -rf "$PREFIX" "$BUILD"/.SDL2*.stamp
+  mkdir -p "$PREFIX"
+fi
+build_lib SDL2 "$SDL2_VERSION" \
+  "https://github.com/libsdl-org/SDL/releases/download/release-$SDL2_VERSION/SDL2-$SDL2_VERSION.tar.gz" \
   5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165 \
   -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF \
   -DSDL_VIDEO=OFF -DSDL_RENDER=OFF -DSDL_AUDIO=OFF -DSDL_JOYSTICK=OFF -DSDL_HAPTIC=OFF \
   -DSDL_SENSOR=OFF -DSDL_HIDAPI=OFF
-if [ "$SDL_STAMP_BEFORE" != "$(cat "$BUILD/.SDL2.stamp")" ]; then
-  rm -f "$BUILD/.SDL2_image.stamp" "$BUILD/.SDL2_ttf.stamp"
-fi
 build_lib SDL2_image 2.8.12 \
   https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.12/SDL2_image-2.8.12.tar.gz \
   393f5efb50536ec13ca4f4affb69cc9966d3c3f969e6c5e701faddf9f9785381 \
-  -DSDL2IMAGE_DEPS_SHARED=OFF -DSDL2IMAGE_VENDORED=OFF -DSDL2IMAGE_SAMPLES=OFF \
+  -DSDL2IMAGE_DEPS_SHARED=OFF -DSDL2IMAGE_VENDORED=OFF -DSDL2IMAGE_SAMPLES=OFF -DSDL2IMAGE_BACKEND_STB=OFF \
   -DSDL2IMAGE_AVIF=OFF -DSDL2IMAGE_JXL=OFF -DSDL2IMAGE_TIF=OFF -DSDL2IMAGE_WEBP=OFF
 build_lib SDL2_ttf 2.24.0 \
   https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.24.0/SDL2_ttf-2.24.0.tar.gz \
