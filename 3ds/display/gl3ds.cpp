@@ -9,17 +9,21 @@
 //   keeps the top row (t = 1, framebuffer top) first in memory: GL row r (t = r / height, row 0 =
 //   framebuffer bottom) is memory row ph - 1 - r, for uploads, read-back, sampling and rendering
 //   alike. Textures larger than 1024 px are not stored yet (logged; draws using them are skipped).
-//   A texture moves from linear memory to VRAM when it is first rendered into (PICA render
-//   targets must be in VRAM: citro3d renderqueue.c, C3D_RenderTargetCreateFromTex).
+//   A texture moves from linear memory to VRAM when it is first drawn into (PICA render targets
+//   must be in VRAM: citro3d renderqueue.c, C3D_RenderTargetCreateFromTex). Clears of textures
+//   still in linear memory are done on the CPU, so bitmaps that are only filled stay there. When
+//   VRAM is full, the least recently used VRAM textures move back to linear memory.
 // - Framebuffers: a texture's render target is created when it is first drawn to. Framebuffer 0
 //   is the top screen (400x240 for mkxp-z; the physical framebuffer is rotated).
 // - Programs: mkxp-z's programs are recognised by their embedded source (the pointers passed to
 //   ShaderSource). Vertex programs run on the CPU at draw time (projection, sprite matrix,
-//   translation, texture coordinates incl. padding); one pass-through PICA shader
-//   (passthrough.v.pica) draws the result. Fragment programs are TEV presets.
+//   translation, texture coordinates incl. padding, tilemap autotile animation); one pass-through
+//   PICA shader (passthrough.v.pica) draws the result. Fragment programs are TEV presets.
 // - Clear honours the scissor box (mkxp-z's fill_rect is scissor + clear): it draws a quad.
-// - ReadPixels finishes the GPU work queued so far and detiles from the texture.
-// - Deletions are deferred to the end of the frame (the GPU may still use the objects).
+// - GPU synchronisation: work is queued per citro3d frame and runs at C3D_FrameEnd. Every texture
+//   records the serial of the last frame that used it; CPU access to a texture (upload, clear,
+//   ReadPixels) waits for the GPU only if that frame has not finished yet.
+// - Deletions are deferred until the GPU has finished every frame that may use the objects.
 #include "gl-fun.h"
 #include "gl3ds.h"
 
@@ -37,6 +41,7 @@
 #include <vector>
 
 #include "passthrough.shbin.xxd"
+#include "util/exception.h"
 
 // Embedded GLSL sources of mkxp-z (generated in the build, src/display/gl/shader.cpp includes
 // the same arrays): their addresses identify the programs.
@@ -56,6 +61,8 @@ SHADER_SRC(sprite_frag)
 SHADER_SRC(bitmapBlit_frag)
 SHADER_SRC(plane_frag)
 SHADER_SRC(transSimple_frag)
+SHADER_SRC(tilemap_frag)
+SHADER_SRC(flashMap_frag)
 #undef SHADER_SRC
 
 GLFunctions gl;
@@ -71,12 +78,19 @@ const float SCREEN_YX = -1.0f;
 
 const int MAX_TEX = 1024; // PICA200
 const size_t VERTEX_RING_BYTES = 1024 * 1024;
+const size_t CMDBUF_BYTES = 512 * 1024;
+// Command words one draw call may add at most (framebuffer, TEV, blend, textures, attributes:
+// a few hundred bytes); the frame is submitted before the buffer gets this close to full
+// (libctru's GPUCMD_Add breaks into the debugger on overflow).
+const u32 CMDBUF_RESERVE_WORDS = 1024;
 
 struct Vtx {
 	float pos[4];
 	float tc[2];
 	float color[4];
+	float tc1[2];
 };
+const size_t RING_VERTICES = VERTEX_RING_BYTES / sizeof(Vtx) / 3 * 3; // whole triangles
 
 struct Tex {
 	GLsizei w = 0, h = 0;
@@ -87,6 +101,7 @@ struct Tex {
 	bool linear = false;
 	bool repeat = false;
 	bool inVram = false; // moved to VRAM when first rendered into (PICA render targets must be in VRAM)
+	u32 useSerial = 0;   // last frame that sampled or rendered into it (see State::frameSerial)
 };
 
 struct Buffer {
@@ -107,7 +122,7 @@ struct VertexArray {
 };
 
 enum class VertKind { Unknown, Simple, SimpleColor, Sprite, Minimal, Tilemap, SimpleMatrix };
-enum class FragKind { Unknown, Simple, SimpleColor, SimpleAlpha, SimpleAlphaUni, FlatColor, Sprite, Blit, Plane, TransSimple };
+enum class FragKind { Unknown, Simple, SimpleColor, SimpleAlpha, SimpleAlphaUni, FlatColor, Sprite, Tilemap, FlashMap, Blit, Plane, TransSimple };
 
 struct ShaderObj {
 	GLenum type = 0;
@@ -134,6 +149,10 @@ struct Program {
 struct State {
 	bool c3dReady = false;
 	bool inFrame = false;
+	// Serial of the frame being built (or the next one); every frame up to completedSerial has
+	// finished on the GPU.
+	u32 frameSerial = 1;
+	u32 completedSerial = 0;
 	C3D_RenderTarget *top = nullptr;
 	shaderProgram_s shader;
 	DVLB_s *dvlb = nullptr;
@@ -150,7 +169,7 @@ struct State {
 	std::unordered_map<GLuint, Program> programs;
 	VertexArray defaultVertexArray;
 	GLuint boundVertexArray = 0, arrayBuffer = 0, framebuffer = 0, program = 0;
-	GLuint boundTex[2] = {0, 0};
+	GLuint boundTex[4] = {0, 0, 0, 0}; // units 0-3 as mkxp-z binds them; draws sample 0 (and 1 for blt)
 	int activeUnit = 0;
 
 	float clearColor[4] = {0, 0, 0, 0};
@@ -161,7 +180,7 @@ struct State {
 	GLint viewport[4] = {0, 0, 400, 240};
 	GLint unpackRowLength = 0, unpackSkipRows = 0, unpackSkipPixels = 0;
 
-	// deferred deletions
+	// deferred deletions: released objects that a submitted or queued frame may still use
 	std::vector<C3D_Tex> deadTextures;
 	std::vector<C3D_RenderTarget *> deadTargets;
 
@@ -193,8 +212,9 @@ inline size_t tiledOffset(u32 x, u32 y, u32 pw) {
 
 void initC3D() {
 	if (st.c3dReady) return;
-	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
+	if (!C3D_Init(CMDBUF_BYTES)) throw Exception(Exception::MKXPError, "gl3ds: C3D_Init failed (out of linear memory)");
 	st.top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, C3D_DEPTHTYPE(-1));
+	if (!st.top) throw Exception(Exception::MKXPError, "gl3ds: cannot create the top screen render target (out of VRAM)");
 	C3D_RenderTargetSetOutput(st.top, GFX_TOP, GFX_LEFT,
 	                          GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
 	                              GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
@@ -202,24 +222,20 @@ void initC3D() {
 	// DVLB_ParseFile reads u32 words and keeps pointers into the data: a 4-byte aligned copy that
 	// lives as long as the program (the embedded array is a byte array without alignment).
 	u32 *shbin = (u32 *)memalign(4, mkxp_shader_passthrough_shbin_len);
+	if (!shbin) throw Exception(Exception::MKXPError, "gl3ds: out of memory");
 	memcpy(shbin, mkxp_shader_passthrough_shbin, mkxp_shader_passthrough_shbin_len);
 	st.dvlb = DVLB_ParseFile(shbin, mkxp_shader_passthrough_shbin_len);
+	if (!st.dvlb) throw Exception(Exception::MKXPError, "gl3ds: cannot parse the PICA shader");
 	shaderProgramInit(&st.shader);
 	shaderProgramSetVsh(&st.shader, &st.dvlb->DVLE[0]);
 	AttrInfo_Init(&st.attrInfo);
 	AttrInfo_AddLoader(&st.attrInfo, 0, GPU_FLOAT, 4);
 	AttrInfo_AddLoader(&st.attrInfo, 1, GPU_FLOAT, 2);
 	AttrInfo_AddLoader(&st.attrInfo, 2, GPU_FLOAT, 4);
+	AttrInfo_AddLoader(&st.attrInfo, 3, GPU_FLOAT, 2);
 	st.ring = (Vtx *)linearAlloc(VERTEX_RING_BYTES);
+	if (!st.ring) throw Exception(Exception::MKXPError, "gl3ds: out of linear memory for the vertex buffer");
 	st.c3dReady = true;
-}
-
-void beginFrame() {
-	initC3D();
-	if (st.inFrame) return;
-	C3D_FrameBegin(0);
-	st.inFrame = true;
-	st.ringUsed = 0;
 }
 
 void freeDeferred() {
@@ -229,15 +245,46 @@ void freeDeferred() {
 	st.deadTextures.clear();
 }
 
-// Ends the frame and waits until the GPU has executed everything (for read-back and buffer
-// reuse). Shows the top screen only if it was drawn in this frame.
-void finishFrame() {
+// Submits the frame being built (C3D_FrameEnd only queues it; the GPU runs it asynchronously).
+void endFrame() {
 	if (!st.inFrame) return;
-	C3D_FrameEnd(0);
+	C3D_FrameEnd(0); // also flushes the CPU data cache of the linear heap (vertices, textures)
 	st.inFrame = false;
-	C3D_FrameBegin(0); // waits for the queued GPU work
-	C3D_FrameEnd(0);
-	freeDeferred();
+	st.frameSerial++;
+}
+
+// Waits until the GPU has finished every submitted frame (outside a frame), then frees the
+// deferred objects. C3D_FrameBegin without C3D_FRAME_NONBLOCK waits for the GPU queue; the
+// empty frame submits nothing (GX_CMDLIST_FLUSH skips the linear heap cache flush).
+void waitGpu() {
+	initC3D();
+	C3D_FrameBegin(0);
+	C3D_FrameEnd(GX_CMDLIST_FLUSH);
+	st.completedSerial = st.frameSerial - 1;
+	freeDeferred(); // outside a frame: C3D_RenderTargetDelete panics inside one
+}
+
+// Submits the queued work and waits for all of it.
+void syncGpu() {
+	endFrame();
+	waitGpu();
+}
+
+// Before the CPU touches a texture's memory: waits if a frame that used it may still be running.
+void syncIfUsed(const Tex &t) {
+	if (t.useSerial > st.completedSerial) syncGpu();
+}
+
+void beginFrame() {
+	initC3D();
+	if (st.inFrame) return;
+	// C3D_FrameBegin waits for the previous frame anyway: free what it may have used first
+	// (render targets can only be deleted outside a frame).
+	if (!st.deadTargets.empty() || !st.deadTextures.empty()) waitGpu();
+	C3D_FrameBegin(0);
+	st.completedSerial = st.frameSerial - 1;
+	st.inFrame = true;
+	st.ringUsed = 0;
 }
 
 Tex *texture(GLuint name) {
@@ -245,27 +292,63 @@ Tex *texture(GLuint name) {
 	return it == st.textures.end() ? nullptr : &it->second;
 }
 
+// Moves a VRAM texture back to linear memory (GPU idle, outside a frame). False if linear memory
+// is full.
+bool evictToLinear(Tex &t) {
+	C3D_Tex lin;
+	if (!C3D_TexInit(&lin, t.pw, t.ph, GPU_RGBA8)) return false;
+	GSPGPU_InvalidateDataCache(t.tex.data, t.tex.size); // written by the GPU
+	memcpy(lin.data, t.tex.data, t.tex.size);
+	C3D_TexFlush(&lin);
+	if (t.target) C3D_RenderTargetDelete(t.target);
+	t.target = nullptr;
+	C3D_TexDelete(&t.tex);
+	t.tex = lin;
+	t.inVram = false;
+	return true;
+}
+
+// Allocates VRAM for `need`; when VRAM is full, moves the least recently used VRAM textures back
+// to linear memory until it fits. May submit and wait for the queued frame (leaves no frame open).
+bool allocVram(Tex &need, C3D_Tex *out) {
+	if (C3D_TexInitVRAM(out, need.pw, need.ph, GPU_RGBA8)) return true;
+	syncGpu(); // queued draws may still use the textures that get evicted
+	for (;;) {
+		Tex *victim = nullptr;
+		for (auto &kv : st.textures) {
+			Tex &c = kv.second;
+			if (c.allocated && c.inVram && &c != &need && (!victim || c.useSerial < victim->useSerial)) victim = &c;
+		}
+		if (!victim || !evictToLinear(*victim)) return false;
+		if (C3D_TexInitVRAM(out, need.pw, need.ph, GPU_RGBA8)) return true;
+	}
+}
+
+// Texture bound to the current framebuffer (nullptr for the screen or an incomplete framebuffer).
+Tex *framebufferTexture() {
+	if (st.framebuffer == 0) return nullptr;
+	auto it = st.framebuffers.find(st.framebuffer);
+	if (it == st.framebuffers.end()) return nullptr;
+	Tex *t = texture(it->second);
+	return t && t->allocated ? t : nullptr;
+}
+
 // Render target of the bound framebuffer (nullptr: nothing to draw into). Sets *screen for the
-// top screen.
+// top screen. May end the frame being built (VRAM eviction): call before beginFrame().
 C3D_RenderTarget *currentTarget(bool *screen, Tex **texOut) {
 	*screen = st.framebuffer == 0;
 	*texOut = nullptr;
 	if (*screen) return st.top;
-	auto it = st.framebuffers.find(st.framebuffer);
-	if (it == st.framebuffers.end()) return nullptr;
-	Tex *t = texture(it->second);
-	if (!t || !t->allocated) return nullptr;
+	Tex *t = framebufferTexture();
+	if (!t) return nullptr;
 	if (!t->inVram) {
-		// Move the texture to VRAM: finish queued GPU work that may use it, copy, free the old
-		// linear copy at the end of the frame.
+		// Move the texture to VRAM. The GPU never writes a linear texture, so the CPU copy is
+		// current; queued draws that sample the old copy keep it until it is freed (deferred).
 		C3D_Tex vram;
-		if (!C3D_TexInitVRAM(&vram, t->pw, t->ph, GPU_RGBA8)) {
+		if (!allocVram(*t, &vram)) {
 			warnOnce("out of VRAM for render targets (" + std::to_string(t->pw) + "x" + std::to_string(t->ph) + ")");
 			return nullptr;
 		}
-		finishFrame();
-		beginFrame();
-		GSPGPU_InvalidateDataCache(t->tex.data, t->tex.size);
 		memcpy(vram.data, t->tex.data, t->tex.size);
 		GSPGPU_FlushDataCache(vram.data, vram.size);
 		st.deadTextures.push_back(t->tex);
@@ -276,6 +359,30 @@ C3D_RenderTarget *currentTarget(bool *screen, Tex **texOut) {
 	if (!t->target) warnOnce("C3D_RenderTargetCreateFromTex failed");
 	*texOut = t;
 	return t->target;
+}
+
+// Clears a texture that is still in linear memory on the CPU (scissor box if enabled), so that
+// creating and filling a bitmap does not move it to VRAM.
+void cpuClear(Tex &t, const float *color) {
+	syncIfUsed(t);
+	GLint x0 = 0, y0 = 0, x1 = t.w, y1 = t.h;
+	if (st.scissorTest) {
+		x0 = std::max(x0, st.scissor[0]);
+		y0 = std::max(y0, st.scissor[1]);
+		x1 = std::min(x1, st.scissor[0] + st.scissor[2]);
+		y1 = std::min(y1, st.scissor[1] + st.scissor[3]);
+	}
+	if (x0 >= x1 || y0 >= y1) return;
+	auto b = [](float v) { return (uint8_t)(std::min(std::max(v, 0.0f), 1.0f) * 255.0f + 0.5f); };
+	const uint8_t px[4] = {b(color[3]), b(color[2]), b(color[1]), b(color[0])}; // A B G R
+	uint8_t *dst = (uint8_t *)t.tex.data;
+	if (x0 == 0 && y0 == 0 && x1 == t.w && y1 == t.h && px[0] == px[1] && px[1] == px[2] && px[2] == px[3]) {
+		memset(dst, px[0], t.tex.size); // whole texture incl. padding
+	} else {
+		for (GLint y = y0; y < y1; y++)
+			for (GLint x = x0; x < x1; x++) memcpy(dst + tiledOffset(x, t.ph - 1 - y, t.pw), px, 4);
+	}
+	C3D_TexFlush(&t.tex);
 }
 
 GPU_BLENDFACTOR blendFactor(GLenum f) {
@@ -335,12 +442,16 @@ u32 packColor(const float *c) {
 	return b(c[0]) | (b(c[1]) << 8) | (b(c[2]) << 16) | (b(c[3]) << 24);
 }
 
-// TEV stages for a fragment program; true if the texture unit 0 is sampled.
-bool setupTexEnv(const Program *prog) {
+// Texture units a TEV preset samples.
+const int SAMPLE_TEX0 = 1, SAMPLE_TEX1 = 2;
+
+// TEV stages for a fragment program; returns the SAMPLE_* units it samples.
+int setupTexEnv(const Program *prog) {
 	for (int i = 0; i < 6; i++) {
 		C3D_TexEnv *env = C3D_GetTexEnv(i);
 		C3D_TexEnvInit(env); // pass-through of the previous stage
 	}
+	C3D_TexEnvBufUpdate(C3D_Both, 0);
 	C3D_TexEnv *e0 = C3D_GetTexEnv(0);
 	FragKind kind = prog ? prog->frag : FragKind::Unknown;
 	switch (kind) {
@@ -349,18 +460,29 @@ bool setupTexEnv(const Program *prog) {
 		C3D_TexEnvSrc(e0, C3D_Both, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
 		C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
 		C3D_TexEnvColor(e0, c ? packColor(c) : 0);
-		return false;
+		return 0;
 	}
 	case FragKind::SimpleColor:
 		C3D_TexEnvSrc(e0, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 		C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
-		return false;
+		return 0;
+	case FragKind::FlashMap: {
+		// flashMap.frag: vec4(v_color.rgb * alpha, 1)
+		const float *a = prog->get("alpha");
+		float c[4] = {a ? a[0] : 1.0f, a ? a[0] : 1.0f, a ? a[0] : 1.0f, 1.0f};
+		C3D_TexEnvSrc(e0, C3D_RGB, GPU_PRIMARY_COLOR, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e0, C3D_RGB, GPU_MODULATE);
+		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_REPLACE);
+		C3D_TexEnvColor(e0, packColor(c));
+		return 0;
+	}
 	case FragKind::SimpleAlpha:
 		C3D_TexEnvSrc(e0, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
 		C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
 		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
-		return true;
+		return SAMPLE_TEX0;
 	case FragKind::SimpleAlphaUni: {
 		const float *a = prog->get("alpha");
 		float c[4] = {0, 0, 0, a ? a[0] : 1.0f};
@@ -369,10 +491,12 @@ bool setupTexEnv(const Program *prog) {
 		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
 		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
 		C3D_TexEnvColor(e0, packColor(c));
-		return true;
+		return SAMPLE_TEX0;
 	}
-	case FragKind::Sprite: {
-		// sprite.frag without gray, pattern, invert and bush (not yet supported):
+	case FragKind::Sprite:
+	case FragKind::Tilemap: {
+		// sprite.frag without gray, pattern, invert and bush (not yet supported), and
+		// tilemap.frag (the same without those) without gray:
 		// rgb = mix(tex.rgb + tone.rgb, color.rgb, color.a); a = tex.a * opacity
 		const float *tone = prog->get("tone");
 		const float *opacity = prog->get("opacity");
@@ -398,13 +522,37 @@ bool setupTexEnv(const Program *prog) {
 		float c[4] = {0, 0, 0, 0};
 		if (color) memcpy(c, color, sizeof c);
 		C3D_TexEnvColor(e2, packColor(c));
-		return true;
+		return SAMPLE_TEX0;
 	}
-	case FragKind::Blit:
-		// bitmapBlit.frag composites against the destination with a division the TEV cannot do;
-		// the texture is drawn with opacity and normal blending (exact for opaque destinations).
-		warnOnce("Bitmap#blt: approximated by alpha blending");
-		/* fallthrough */
+	case FragKind::Blit: {
+		// bitmapBlit.frag (unit 0 source, unit 1 a copy of the destination):
+		//   co1 = src.a * opacity, w = dst.a * (1 - co1), a = co1 + w,
+		//   rgb = (co1 * src.rgb + w * dst.rgb) / a   (src.rgb where a == 0)
+		// The TEV cannot divide; this computes rgb = mix(src.rgb, dst.rgb, w), which is exact
+		// when dst.a is 0 or 1 (transparent or opaque destination pixels) and close in between.
+		// Stage 0: rgb = src, a = co1 (also into the combiner buffer, read by stage 2).
+		const float *opacity = prog->get("opacity");
+		float c[4] = {0, 0, 0, opacity ? opacity[0] : 1.0f};
+		C3D_TexEnvSrc(e0, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
+		C3D_TexEnvFunc(e0, C3D_RGB, GPU_REPLACE);
+		C3D_TexEnvSrc(e0, C3D_Alpha, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
+		C3D_TexEnvColor(e0, packColor(c));
+		C3D_TexEnvBufUpdate(C3D_Alpha, BIT(0));
+		// Stage 1: a = dst.a * (1 - co1) = w.
+		C3D_TexEnv *e1 = C3D_GetTexEnv(1);
+		C3D_TexEnvSrc(e1, C3D_Alpha, GPU_TEXTURE1, GPU_PREVIOUS, GPU_PREVIOUS);
+		C3D_TexEnvOpAlpha(e1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+		C3D_TexEnvFunc(e1, C3D_Alpha, GPU_MODULATE);
+		// Stage 2: rgb = dst * w + src * (1 - w); a = w + co1 (buffer: stage 0's output).
+		C3D_TexEnv *e2 = C3D_GetTexEnv(2);
+		C3D_TexEnvSrc(e2, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_PREVIOUS);
+		C3D_TexEnvOpRgb(e2, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
+		C3D_TexEnvFunc(e2, C3D_RGB, GPU_INTERPOLATE);
+		C3D_TexEnvSrc(e2, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS_BUFFER, GPU_PREVIOUS);
+		C3D_TexEnvFunc(e2, C3D_Alpha, GPU_ADD);
+		return SAMPLE_TEX0 | SAMPLE_TEX1;
+	}
 	default: {
 		if (kind == FragKind::Unknown) warnOnce("unknown fragment program: drawn as plain texture");
 		if (kind == FragKind::Plane || kind == FragKind::TransSimple) warnOnce("plane/transition effects not supported yet");
@@ -414,7 +562,7 @@ bool setupTexEnv(const Program *prog) {
 		float c[4] = {0, 0, 0, opacity ? opacity[0] : 1.0f};
 		C3D_TexEnvFunc(e0, C3D_Alpha, GPU_MODULATE);
 		C3D_TexEnvColor(e0, packColor(c));
-		return true;
+		return SAMPLE_TEX0;
 	}
 	}
 }
@@ -422,6 +570,11 @@ bool setupTexEnv(const Program *prog) {
 // Multiplies a column-major 4x4 matrix with (x, y, 0, 1).
 inline void mulMat(const float *m, float x, float y, float out[4]) {
 	for (int r = 0; r < 4; r++) out[r] = m[r] * x + m[4 + r] * y + m[12 + r];
+}
+
+// Multiplies a column-major 4x4 matrix with a vec4.
+inline void mulMat4(const float *m, const float *v, float out[4]) {
+	for (int r = 0; r < 4; r++) out[r] = m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3];
 }
 
 const uint8_t *attribData(const AttribPointer &a, size_t vertex) {
@@ -432,134 +585,183 @@ const uint8_t *attribData(const AttribPointer &a, size_t vertex) {
 	return it->second.data.data() + off;
 }
 
+// tilemap.vert's autotile animation: texture coordinate offset of animated autotiles.
+void tilemapAnimate(const Program *prog, float &u, float &v) {
+	const float tileW = 32, tileH = 32, autotileW = 3 * tileW, autotileH = 4 * tileW;
+	const int nAutotiles = 7;
+	const float *aniIndex = prog->get("aniIndex");
+	const float *atFrames = prog->get("atFrames");
+	if (!aniIndex || !atFrames) return;
+	if (!(u <= autotileW && v <= autotileH * nAutotiles)) return;
+	int atIndex = std::min(std::max((int)(v / autotileH), 0), nAutotiles - 1);
+	int frames = (int)atFrames[atIndex], ani = (int)aniIndex[0];
+	if (frames <= 0) return;
+	int frame = ani % frames;
+	int row = frame / 8, col = frame - 8 * row;
+	u += 3 * tileW * col;
+	v += tileH * row;
+}
+
+// Runs the vertex program on the CPU for one vertex.
+void transformVertex(const Program *prog, const VertexArray &va, size_t vi, bool screen, const Tex *tex0, const Tex *tex1, Vtx &v) {
+	static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+	const float *proj = prog->get("projMat");
+	if (!proj) proj = identity;
+	const float *translation = prog->get("translation");
+	const float *texSizeInv = prog->get("texSizeInv");
+	const float *model = prog->vert == VertKind::Sprite ? prog->get("spriteMat")
+	                     : prog->vert == VertKind::SimpleMatrix ? prog->get("matrix")
+	                                                            : nullptr;
+	const float *p = (const float *)attribData(va.attribs[0], vi);
+	const float *t = va.attribs[1].enabled ? (const float *)attribData(va.attribs[1], vi) : nullptr;
+	const float *c = va.attribs[2].enabled ? (const float *)attribData(va.attribs[2], vi) : nullptr;
+	float x = p ? p[0] : 0, y = p ? p[1] : 0;
+	if (translation && (prog->vert == VertKind::Simple || prog->vert == VertKind::SimpleColor || prog->vert == VertKind::Tilemap)) {
+		x += translation[0];
+		y += translation[1];
+	}
+	float clip[4];
+	if (model) {
+		float s[4];
+		mulMat(model, x, y, s);
+		mulMat4(proj, s, clip);
+	} else {
+		mulMat(proj, x, y, clip);
+	}
+	if (screen) {
+		float cx = clip[0];
+		clip[0] = SCREEN_XX * clip[1];
+		clip[1] = SCREEN_YX * cx;
+	}
+	v.pos[0] = clip[0];
+	v.pos[1] = clip[1];
+	v.pos[2] = -0.5f * clip[3]; // PICA clip space: -w <= z <= 0
+	v.pos[3] = clip[3];
+	float u = t ? t[0] : 0, w = t ? t[1] : 0;
+	if (prog->vert == VertKind::Tilemap) tilemapAnimate(prog, u, w);
+	if (texSizeInv) {
+		u *= texSizeInv[0];
+		w *= texSizeInv[1];
+	}
+	// logical [0, 1] texture coordinates -> padded texture
+	v.tc[0] = tex0 ? u * tex0->w / tex0->pw : u;
+	v.tc[1] = tex0 ? w * tex0->h / tex0->ph : w;
+	if (tex1) {
+		// bitmapBlit.frag: dstCoor = (v_texCoord - subRect.xy) * subRect.zw
+		const float *sub = prog->get("subRect");
+		float du = sub ? (u - sub[0]) * sub[2] : u, dv = sub ? (w - sub[1]) * sub[3] : w;
+		v.tc1[0] = du * tex1->w / tex1->pw;
+		v.tc1[1] = dv * tex1->h / tex1->ph;
+	} else {
+		v.tc1[0] = v.tc1[1] = 0;
+	}
+	if (c)
+		memcpy(v.color, c, sizeof v.color);
+	else
+		v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1;
+}
+
+void bindSampled(int unit, Tex *t) {
+	if (!t) {
+		C3D_TexBind(unit, nullptr);
+		return;
+	}
+	C3D_TexSetFilter(&t->tex, t->linear ? GPU_LINEAR : GPU_NEAREST, t->linear ? GPU_LINEAR : GPU_NEAREST);
+	C3D_TexSetWrap(&t->tex, t->repeat ? GPU_REPEAT : GPU_CLAMP_TO_EDGE, t->repeat ? GPU_REPEAT : GPU_CLAMP_TO_EDGE);
+	C3D_TexBind(unit, &t->tex);
+}
+
 // Draws count indexed vertices (GL_TRIANGLES, uint16 indices at byte offset) with the current
-// program, textures and state.
+// program, textures and state; clearQuad draws a quad of quadColor over the whole target.
 void draw(GLsizei count, uintptr_t indexOffset, bool clearQuad = false, const float *quadColor = nullptr) {
 	bool screen;
 	Tex *targetTex;
-	beginFrame();
-	C3D_RenderTarget *target = currentTarget(&screen, &targetTex);
+	C3D_RenderTarget *target = currentTarget(&screen, &targetTex); // may end the frame
 	if (!target) return;
-	if (st.ringUsed + (size_t)count > VERTEX_RING_BYTES / sizeof(Vtx)) {
-		finishFrame();
-		beginFrame();
-	}
-	C3D_FrameDrawOn(target);
-	Vtx *out = st.ring + st.ringUsed;
-	Program *prog = nullptr;
-	bool sampled = false;
-	Tex *tex0 = nullptr;
-	float uScale = 1, vScale = 1;
 
+	Program *prog = nullptr;
+	Tex *tex0 = nullptr, *tex1 = nullptr;
+	const VertexArray *va = nullptr;
+	const uint16_t *indices = nullptr;
 	if (clearQuad) {
-		// two triangles over the viewport in clip space, constant color, no blending
-		static const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {1, 1}, {-1, 1}, {-1, -1}};
-		for (int i = 0; i < 6; i++) {
-			Vtx &v = out[i];
-			float x = corners[i][0], y = corners[i][1];
-			v.pos[0] = screen ? SCREEN_XX * y : x;
-			v.pos[1] = screen ? SCREEN_YX * x : y;
-			v.pos[2] = -0.5f; // PICA clip space: -w <= z <= 0
-			v.pos[3] = 1;
-			v.tc[0] = v.tc[1] = 0;
-			memcpy(v.color, quadColor, sizeof v.color);
-		}
 		count = 6;
-		C3D_TexEnv *e0 = C3D_GetTexEnv(0);
-		for (int i = 0; i < 6; i++) C3D_TexEnvInit(C3D_GetTexEnv(i));
-		C3D_TexEnvSrc(e0, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-		C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
-		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 	} else {
 		auto pit = st.programs.find(st.program);
 		prog = pit == st.programs.end() ? nullptr : &pit->second;
 		if (!prog) return;
-		sampled = setupTexEnv(prog);
-		if (sampled) {
-			tex0 = texture(st.boundTex[0]);
-			if (!tex0 || !tex0->allocated) return;
-			if (tex0 == targetTex) {
+		va = st.boundVertexArray ? &st.vertexArrays[st.boundVertexArray] : &st.defaultVertexArray;
+		auto ib = st.buffers.find(va->elementBuffer);
+		if (ib == st.buffers.end() || indexOffset + (size_t)count * 2 > ib->second.data.size()) return;
+		indices = (const uint16_t *)(ib->second.data.data() + indexOffset);
+	}
+
+	for (GLsizei first = 0; first < count;) {
+		GLsizei n = std::min((GLsizei)RING_VERTICES, count - first);
+		beginFrame();
+		if (st.ringUsed + (size_t)n > RING_VERTICES || gpuCmdBufOffset + CMDBUF_RESERVE_WORDS > gpuCmdBufSize) {
+			endFrame(); // vertex ring or command buffer full: submit; beginFrame waits for it
+			beginFrame();
+		}
+		C3D_FrameDrawOn(target);
+		Vtx *out = st.ring + st.ringUsed;
+		int sampled = 0;
+		if (clearQuad) {
+			// two triangles over the target in clip space, constant color, no blending
+			static const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {1, 1}, {-1, 1}, {-1, -1}};
+			for (int i = 0; i < 6; i++) {
+				Vtx &v = out[i];
+				float x = corners[i][0], y = corners[i][1];
+				v.pos[0] = screen ? SCREEN_XX * y : x;
+				v.pos[1] = screen ? SCREEN_YX * x : y;
+				v.pos[2] = -0.5f; // PICA clip space: -w <= z <= 0
+				v.pos[3] = 1;
+				v.tc[0] = v.tc[1] = v.tc1[0] = v.tc1[1] = 0;
+				memcpy(v.color, quadColor, sizeof v.color);
+			}
+			for (int i = 0; i < 6; i++) C3D_TexEnvInit(C3D_GetTexEnv(i));
+			C3D_TexEnvBufUpdate(C3D_Both, 0);
+			C3D_TexEnv *e0 = C3D_GetTexEnv(0);
+			C3D_TexEnvSrc(e0, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+			C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
+			C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+		} else {
+			sampled = setupTexEnv(prog);
+			tex0 = (sampled & SAMPLE_TEX0) ? texture(st.boundTex[0]) : nullptr;
+			tex1 = (sampled & SAMPLE_TEX1) ? texture(st.boundTex[1]) : nullptr;
+			if (((sampled & SAMPLE_TEX0) && (!tex0 || !tex0->allocated)) || ((sampled & SAMPLE_TEX1) && (!tex1 || !tex1->allocated)))
+				return;
+			if ((tex0 && tex0 == targetTex) || (tex1 && tex1 == targetTex)) {
 				warnOnce("feedback loop (texture is the render target): skipped");
 				return;
 			}
-			uScale = (float)tex0->w / tex0->pw;
-			vScale = (float)tex0->h / tex0->ph;
-		}
-		const VertexArray &va = st.boundVertexArray ? st.vertexArrays[st.boundVertexArray] : st.defaultVertexArray;
-		auto ib = st.buffers.find(va.elementBuffer);
-		if (ib == st.buffers.end() || indexOffset + (size_t)count * 2 > ib->second.data.size()) return;
-		const uint16_t *indices = (const uint16_t *)(ib->second.data.data() + indexOffset);
-		const float *proj = prog->get("projMat");
-		const float *spriteMat = prog->get("spriteMat");
-		const float *translation = prog->get("translation");
-		const float *texSizeInv = prog->get("texSizeInv");
-		static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-		if (!proj) proj = identity;
-		for (GLsizei i = 0; i < count; i++) {
-			size_t vi = indices[i];
-			const float *p = (const float *)attribData(va.attribs[0], vi);
-			const float *t = va.attribs[1].enabled ? (const float *)attribData(va.attribs[1], vi) : nullptr;
-			const float *c = va.attribs[2].enabled ? (const float *)attribData(va.attribs[2], vi) : nullptr;
-			Vtx &v = out[i];
-			float x = p ? p[0] : 0, y = p ? p[1] : 0;
-			if (translation && (prog->vert == VertKind::Simple || prog->vert == VertKind::Tilemap)) {
-				x += translation[0];
-				y += translation[1];
-			}
-			float clip[4];
-			if (prog->vert == VertKind::Sprite && spriteMat) {
-				float s[4];
-				mulMat(spriteMat, x, y, s);
-				for (int r = 0; r < 4; r++)
-					clip[r] = proj[r] * s[0] + proj[4 + r] * s[1] + proj[8 + r] * s[2] + proj[12 + r] * s[3];
-			} else {
-				mulMat(proj, x, y, clip);
-			}
-			if (screen) {
-				float cx = clip[0];
-				clip[0] = SCREEN_XX * clip[1];
-				clip[1] = SCREEN_YX * cx;
-			}
-			v.pos[0] = clip[0];
-			v.pos[1] = clip[1];
-			v.pos[2] = -0.5f * clip[3]; // PICA clip space: -w <= z <= 0
-			v.pos[3] = clip[3];
-			float u = t ? t[0] : 0, w = t ? t[1] : 0;
-			if (texSizeInv) {
-				u *= texSizeInv[0];
-				w *= texSizeInv[1];
-			}
-			v.tc[0] = u * uScale;
-			v.tc[1] = w * vScale;
-			if (c)
-				memcpy(v.color, c, sizeof v.color);
+			for (GLsizei i = 0; i < n; i++) transformVertex(prog, *va, indices[first + i], screen, tex0, tex1, out[i]);
+			if (prog->frag == FragKind::Blit)
+				// the TEV preset already composites with the destination copy (unit 1)
+				C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+			else if (st.blend)
+				C3D_AlphaBlend(toBlendEquation(st.blendEq), toBlendEquation(st.blendEq), blendFactor(st.blendSrcRgb),
+				               blendFactor(st.blendDstRgb), blendFactor(st.blendSrcA), blendFactor(st.blendDstA));
 			else
-				v.color[0] = v.color[1] = v.color[2] = v.color[3] = 1;
+				C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 		}
-		if (prog->frag == FragKind::Blit)
-			// approximation of bitmapBlit.frag (see setupTexEnv): normal alpha compositing
-			C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
-		else if (st.blend)
-			C3D_AlphaBlend(toBlendEquation(st.blendEq), toBlendEquation(st.blendEq), blendFactor(st.blendSrcRgb),
-			               blendFactor(st.blendDstRgb), blendFactor(st.blendSrcA), blendFactor(st.blendDstA));
-		else
-			C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-		if (sampled) {
-			C3D_TexSetFilter(&tex0->tex, tex0->linear ? GPU_LINEAR : GPU_NEAREST, tex0->linear ? GPU_LINEAR : GPU_NEAREST);
-			C3D_TexSetWrap(&tex0->tex, tex0->repeat ? GPU_REPEAT : GPU_CLAMP_TO_EDGE, tex0->repeat ? GPU_REPEAT : GPU_CLAMP_TO_EDGE);
-			C3D_TexBind(0, &tex0->tex);
-		}
+		// unbind what is not sampled: citro3d keeps pointers to bound C3D_Tex structs
+		bindSampled(0, tex0);
+		bindSampled(1, tex1);
+		if (tex0) tex0->useSerial = st.frameSerial;
+		if (tex1) tex1->useSerial = st.frameSerial;
+		if (targetTex) targetTex->useSerial = st.frameSerial;
+		applyViewportScissor(screen, st.scissorTest, targetTex, clearQuad);
+		C3D_BindProgram(&st.shader);
+		C3D_SetAttrInfo(&st.attrInfo);
+		C3D_BufInfo *bi = C3D_GetBufInfo();
+		BufInfo_Init(bi);
+		BufInfo_Add(bi, out, sizeof(Vtx), 4, 0x3210);
+		C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_ALL);
+		C3D_CullFace(GPU_CULL_NONE);
+		C3D_DrawArrays(GPU_TRIANGLES, 0, n);
+		st.ringUsed += n;
+		first += n;
 	}
-	applyViewportScissor(screen, st.scissorTest, targetTex, clearQuad);
-	C3D_BindProgram(&st.shader);
-	C3D_SetAttrInfo(&st.attrInfo);
-	C3D_BufInfo *bi = C3D_GetBufInfo();
-	BufInfo_Init(bi);
-	BufInfo_Add(bi, out, sizeof(Vtx), 3, 0x210);
-	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_ALL);
-	C3D_CullFace(GPU_CULL_NONE);
-	C3D_DrawArrays(GPU_TRIANGLES, 0, count);
-	st.ringUsed += count;
 }
 
 // ---- GL entry points ---------------------------------------------------------------------------
@@ -574,7 +776,12 @@ void APIENTRY clearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a) {
 }
 
 void APIENTRY clear(GLbitfield mask) {
-	if (mask & GL_COLOR_BUFFER_BIT) draw(6, 0, true, st.clearColor);
+	if (!(mask & GL_COLOR_BUFFER_BIT)) return;
+	Tex *t = framebufferTexture();
+	if (t && !t->inVram)
+		cpuClear(*t, st.clearColor); // not a render target yet: keep it in linear memory
+	else
+		draw(6, 0, true, st.clearColor);
 }
 
 const GLubyte *APIENTRY getString(GLenum name) {
@@ -615,7 +822,7 @@ void APIENTRY readPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, 
 		warnOnce("ReadPixels only supports texture framebuffers");
 		return;
 	}
-	finishFrame();
+	syncIfUsed(*t); // queued or running draws into it
 	GSPGPU_InvalidateDataCache(t->tex.data, t->tex.size);
 	const uint8_t *src = (const uint8_t *)t->tex.data;
 	uint8_t *dst = (uint8_t *)pixels;
@@ -691,7 +898,7 @@ void APIENTRY deleteTextures(GLsizei n, const GLuint *t) {
 		for (GLuint &b : st.boundTex)
 			if (b == t[i]) b = 0;
 	}
-	if (!st.inFrame) freeDeferred();
+	// freed once the GPU has finished the frames that may use them (beginFrame/waitGpu)
 }
 
 void APIENTRY bindTexture(GLenum, GLuint t) { st.boundTex[st.activeUnit] = t; }
@@ -717,7 +924,7 @@ void uploadRect(Tex &t, GLint x, GLint y, GLsizei w, GLsizei h, const uint8_t *d
 void APIENTRY texImage2D(GLenum, GLint, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum, const GLvoid *data) {
 	Tex *t = texture(st.boundTex[st.activeUnit]);
 	if (!t) return;
-	if (t->allocated && (t->w != w || t->h != h)) releaseTex(*t);
+	if (t->allocated && (t->w != w || t->h != h)) releaseTex(*t); // freed when the GPU is done with it
 	t->w = w, t->h = h;
 	if (w > MAX_TEX || h > MAX_TEX) {
 		warnOnce("texture larger than 1024 px not supported yet: " + std::to_string(w) + "x" + std::to_string(h));
@@ -730,6 +937,10 @@ void APIENTRY texImage2D(GLenum, GLint, GLint, GLsizei w, GLsizei h, GLint, GLen
 			return;
 		}
 		t->allocated = true;
+		t->inVram = false;
+		t->useSerial = 0;
+	} else {
+		syncIfUsed(*t); // same size: rewritten in place, after the draws that use the old content
 	}
 	memset(t->tex.data, 0, t->tex.size);
 	if (data) uploadRect(*t, 0, 0, w, h, (const uint8_t *)data, format);
@@ -740,7 +951,7 @@ void APIENTRY texSubImage2D(GLenum, GLint, GLint x, GLint y, GLsizei w, GLsizei 
 	Tex *t = texture(st.boundTex[st.activeUnit]);
 	if (!t || !t->allocated || !data) return;
 	if (x < 0 || y < 0 || x + w > t->w || y + h > t->h) return;
-	finishFrame(); // the texture may be in use by queued draws
+	syncIfUsed(*t); // draws queued before must see the old content
 	uploadRect(*t, x, y, w, h, (const uint8_t *)data, format);
 	C3D_TexFlush(&t->tex);
 }
@@ -751,7 +962,11 @@ void APIENTRY texParameteri(GLenum, GLenum pname, GLint param) {
 	if (pname == GL_TEXTURE_MAG_FILTER) t->linear = param == GL_LINEAR;
 	else if (pname == GL_TEXTURE_WRAP_S) t->repeat = param == GL_REPEAT;
 }
-void APIENTRY activeTexture(GLenum unit) { st.activeUnit = (unit - GL_TEXTURE0) & 1; }
+void APIENTRY activeTexture(GLenum unit) {
+	GLuint u = unit - GL_TEXTURE0;
+	if (u < 4) st.activeUnit = (int)u;
+	else warnOnce("ActiveTexture: unit " + std::to_string(u) + " not supported");
+}
 void APIENTRY generateMipmap(GLenum) {}
 
 void APIENTRY genBuffers(GLsizei n, GLuint *b) { genNames(n, b); }
@@ -825,6 +1040,8 @@ void APIENTRY linkProgram(GLuint p) {
 		else if (src == mkxp_shader_bitmapBlit_frag) prog.frag = FragKind::Blit;
 		else if (src == mkxp_shader_plane_frag) prog.frag = FragKind::Plane;
 		else if (src == mkxp_shader_transSimple_frag) prog.frag = FragKind::TransSimple;
+		else if (src == mkxp_shader_tilemap_frag) prog.frag = FragKind::Tilemap;
+		else if (src == mkxp_shader_flashMap_frag) prog.frag = FragKind::FlashMap;
 	}
 }
 void APIENTRY getProgramiv(GLuint, GLenum pname, GLint *params) { *params = (pname == GL_LINK_STATUS) ? GL_TRUE : 0; }
@@ -915,9 +1132,7 @@ void APIENTRY bindVertexArray(GLuint a) { st.boundVertexArray = a; }
 void gl3dsPresent() {
 	beginFrame(); // a frame with nothing drawn still shows the (cleared) screen
 	C3D_FrameDrawOn(st.top);
-	C3D_FrameEnd(0);
-	st.inFrame = false;
-	freeDeferred();
+	endFrame(); // submitted; deferred deletions wait for the GPU (next beginFrame)
 }
 
 // Fills `gl`. Entries the 3DS does not provide stay null, which mkxp-z checks for:

@@ -49,6 +49,15 @@
 
 #include <SDL_surface.h>
 
+// Tile texture rects are inset by half a screen pixel, in texels. mkxp-z-3ds: the 3DS renders
+// below 1:1 (framebufferScalingFactor 0.5), where that inset would be a whole texel and cut tile
+// edges; keep it at half a texel there.
+#ifdef __3DS__
+#define TILE_INSET_SCALE std::max(shState->config().framebufferScalingFactor, 1.0)
+#else
+#define TILE_INSET_SCALE shState->config().framebufferScalingFactor
+#endif
+
 extern const StaticRect autotileRects[];
 
 typedef std::vector<SVertex> SVVector;
@@ -715,10 +724,10 @@ struct TilemapPrivate
 				atSelectSubPos(posRect, i);
 
 				FloatRect texRect = pieceRect[i];
-				texRect.x += 0.5f/(float)shState->config().framebufferScalingFactor;
-				texRect.y += 0.5f/(float)shState->config().framebufferScalingFactor;
-				texRect.w -= 1.0f/(float)shState->config().framebufferScalingFactor;
-				texRect.h -= 1.0f/(float)shState->config().framebufferScalingFactor;
+				texRect.x += 0.5f/(float)TILE_INSET_SCALE;
+				texRect.y += 0.5f/(float)TILE_INSET_SCALE;
+				texRect.w -= 1.0f/(float)TILE_INSET_SCALE;
+				texRect.h -= 1.0f/(float)TILE_INSET_SCALE;
 
 				/* Adjust to atlas coordinates */
 				texRect.y += atInd * autotileH;
@@ -734,7 +743,7 @@ struct TilemapPrivate
 		else
 		{
 			FloatRect posRect(x*32, y*32, 32, 32);
-			FloatRect texRect(0.5f/(float)shState->config().framebufferScalingFactor, atInd * autotileH + 0.5f/(float)shState->config().framebufferScalingFactor, 32 - 1.0f/(float)shState->config().framebufferScalingFactor, 32 - 1.0f/(float)shState->config().framebufferScalingFactor);
+			FloatRect texRect(0.5f/(float)TILE_INSET_SCALE, atInd * autotileH + 0.5f/(float)TILE_INSET_SCALE, 32 - 1.0f/(float)TILE_INSET_SCALE, 32 - 1.0f/(float)TILE_INSET_SCALE);
 			SVertex v[4];
 			Quad::setTexPosRect(v, texRect, posRect);
 
@@ -786,7 +795,7 @@ struct TilemapPrivate
 		int tileY = tsInd / 8;
 
 		Vec2i texPos = TileAtlas::tileToAtlasCoor(tileX, tileY, atlas.efTilesetH, atlas.size.y);
-		FloatRect texRect((float) texPos.x + 0.5f/(float)shState->config().framebufferScalingFactor, (float) texPos.y + 0.5f/(float)shState->config().framebufferScalingFactor, 32 - 1.0f/(float)shState->config().framebufferScalingFactor, 32 - 1.0f/(float)shState->config().framebufferScalingFactor);
+		FloatRect texRect((float) texPos.x + 0.5f/(float)TILE_INSET_SCALE, (float) texPos.y + 0.5f/(float)TILE_INSET_SCALE, 32 - 1.0f/(float)TILE_INSET_SCALE, 32 - 1.0f/(float)TILE_INSET_SCALE);
 		FloatRect posRect(x*32, y*32, 32, 32);
 
 		SVertex v[4];

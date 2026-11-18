@@ -29,7 +29,12 @@ struct TexPoolPrivate;
 class TexPool
 {
 public:
+#ifdef __3DS__
+	// mkxp-z-3ds: keep fewer disposed bitmaps around (limited memory; VRAM is 6 MB)
+	TexPool(uint32_t maxMemSize = 4000000 /* 4 MB */);
+#else
 	TexPool(uint32_t maxMemSize = 20000000 /* 20 MB */);
+#endif
 	~TexPool();
 
 	TEXFBO request(int width, int height);

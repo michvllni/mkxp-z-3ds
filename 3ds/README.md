@@ -29,26 +29,34 @@ involved.
   for the PICA200 on citro3d (rmxp3ds `docs/DECISIONS.md` D14). Design (see the top of
   `gl3ds.cpp`):
   - **Textures:** RGBA8, padded to powers of two, swizzled on the CPU. They move to VRAM the first
-    time they are rendered into, because PICA render targets must be in VRAM.
+    time they are drawn into, because PICA render targets must be in VRAM; clears of textures
+    still in linear memory run on the CPU. When VRAM (6 MB) is full, the least recently used
+    textures move back to linear memory.
   - **Framebuffer 0** is the top screen. mkxp-z sees a 400×240 window; the physical framebuffer is
     rotated.
   - **Vertex programs** run on the CPU, followed by one pass-through PICA shader
     (`display/passthrough.v.pica`).
   - **Fragment programs:** recognised by their embedded source and mapped to TEV presets.
   - **`glClear`** draws a quad over the whole target, so the scissor applies.
-  - **`ReadPixels`** waits for the GPU and detiles.
+  - **GPU synchronisation:** draws are queued per citro3d frame. Each texture remembers the last
+    frame that used it; uploads, CPU clears and `ReadPixels` wait for the GPU only when that
+    frame has not finished. Deleted objects are freed once the GPU is done with them. A full
+    vertex ring or command buffer submits the frame early.
 
   **Works:**
-  - textures, render targets, clear/`fill_rect`, `blt` (approximated), `draw_text`, `get_pixel`;
-  - sprites (opacity, color, tone without gray), plain textures, flat and vertex colors;
+  - textures, render targets, clear/`fill_rect`, `draw_text`, `get_pixel`,
+    `Graphics.snap_to_bitmap`;
+  - `blt` with opacity: exact on transparent and opaque destination pixels, approximated on
+    semi-transparent ones (the TEV cannot divide);
+  - sprites and tilemap layers (opacity, color, tone without gray), autotile animation, window
+    contents, tilemap flashes, plain textures, flat and vertex colors;
   - presenting to the top screen.
 
   **Missing:**
   - Textures over 1024 px (stored as pieces later; the table reports 4096 so mkxp-z's tileset
     atlas fits real tilesets).
-  - The gray tone, bush, pattern and invert of sprites.
+  - The gray tone of sprites and tilemaps; bush, pattern and invert of sprites.
   - Plane and transitions.
-  - Tilemaps.
   - Hue, blur and the remaining programs (drawn as plain texture, logged once).
 - **Screen resolution (rmxp3ds D15):** the game screen is rendered at 3DS height, pillarboxed.
   mkxp-z's Hires mode scales its screen buffers by `framebufferScalingFactor`. `main3ds.cpp`
@@ -74,6 +82,13 @@ involved.
   - `src/input/input.cpp`: `Input::Controller.name` returns "Nintendo 3DS".
   - `src/display/graphics.cpp`: frames end in `gl3dsPresent()` instead of `SDL_GL_SwapWindow`.
   - `src/display/bitmap.cpp`: no high-res bitmap twins in Hires mode (`MKXPZ_HIRES_BITMAPS`).
+  - `src/display/graphics.cpp` `snapToBitmap`: a plain bitmap of the game's size, scaled up from
+    the screen buffer (upstream's Hires snapshot relies on bitmap twins).
+  - `src/display/gl/glstate.h`: the scissor box is applied again even when unchanged. Upstream
+    scales it when the Hires ping-pong framebuffer is bound, so the cached value can be wrong for
+    a bitmap with the same box (`fill_rect` then fills only a quarter).
+  - `src/display/gl/texpool.h`: the pool of disposed bitmaps keeps 4 MB instead of 20 MB.
+  - `src/display/tilemap.cpp`: tile texture insets stay half a texel below 1:1 scaling.
   - `binding/binding-mri.cpp` `showExc`: the uncaught-error text also goes to `rgssErrorMsg`.
 - **MIDI:** fluidsynth is loaded at run time as on desktop. That fails on the 3DS, so MIDI is
   disabled.

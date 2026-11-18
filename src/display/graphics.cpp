@@ -1465,6 +1465,19 @@ void Graphics::fadein(int duration) {
 Bitmap *Graphics::snapToBitmap() {
     p->screen.composite();
 
+#ifdef __3DS__
+    // mkxp-z-3ds: no high-res bitmap twins on the 3DS (bitmap.cpp), so the snapshot is a plain
+    // bitmap of the game's size. The screen buffer is described with that size: the blit
+    // normalizes texture coordinates by it, which scales the smaller buffer up.
+    {
+        TEXFBO tf = p->screen.getPP().frontBuffer();
+        tf.width = width();
+        tf.height = height();
+        tf.selfHires = nullptr;
+        return new Bitmap(tf);
+    }
+#endif
+
     if (shState->config().enableHires) {
         // TODO: Maybe don't reconstruct this struct every time?
         TEXFBO tf;
