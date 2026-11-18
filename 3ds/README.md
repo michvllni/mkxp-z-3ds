@@ -141,10 +141,12 @@ involved.
     `sdmc:/rmxp3ds/test/autoexit` it exits after 3 s. If the RGSS thread does not stop within
     10 s, the app shows that and ends the process without tearing down state the thread still
     uses.
-- **HOME menu and sleep mode** are handled by APT on the main thread. The game is not paused: with
-  no rendering there is nothing to protect. Halting the RGSS thread from an APT hook would block
-  HOME/sleep until its next `Graphics.update`; the renderer will stop drawing while suspended
-  instead.
+- **HOME menu and sleep mode** are handled by APT on the main thread. citro3d's own APT hook
+  waits for and clears the GPU queue there, while the RGSS thread may be drawing. gl3ds therefore
+  pauses rendering at a frame boundary: the RGSS thread holds a lock while a citro3d frame is
+  open, our APT hook takes it on suspend and sleep (before citro3d's hook runs), and the main loop
+  releases it after `aptMainLoop()` returns. Ruby keeps running until its next draw. The wait
+  for the lock lasts at most until the current frame ends.
 
 ## Known limitations (this stage)
 - **Renderer:** see the "Missing" list above.
