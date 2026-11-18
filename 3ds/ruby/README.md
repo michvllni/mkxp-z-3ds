@@ -38,11 +38,11 @@ calls `RUBY_INIT_STACK`: with main()'s stack, give it a large stack
 ## Patches (`patches/`, applied in order)
 | Patch | Why |
 |---|---|
-| 0001 thread_pthread | `signal()` instead of `posix_signal()`; main-thread stack size from libctru's `__stacksize__` (otherwise no stack overflow detection); thread stacks sized and located; new threads at the creator's priority; `native_thread_yield` via `svcSleepThread(0)` (newlib's `sched_yield` is an ENOSYS stub) |
+| 0001 thread_pthread | `signal()` instead of `posix_signal()`; stack size of the Ruby main thread from `rb3ds_main_stack_size` or libctru's `__stacksize__` (otherwise no stack overflow detection); thread stacks sized and located; new threads at the creator's priority and detached (shim hook); `native_thread_yield` via `svcSleepThread(0)` (newlib's `sched_yield` is an ENOSYS stub) |
 | 0002 gc | no read-barrier signal handlers without sigaction (compaction is unavailable anyway) |
 | 0003 file | `sdmc:/`, `romfs:/` are absolute paths; `File.dirname` keeps the device |
 | 0004 coroutine/arm32 | save d8–d15 in Fiber switches (hard-float AAPCS) |
-| 0005 cont | fiber pool starts with 2 stacks instead of 8 (zeroed heap memory: ~0.65 instead of ~2.6 MB at boot) |
+| 0005 cont | fiber pool starts with 2 stacks instead of 8 (zeroed heap memory: ~0.65 instead of ~2.6 MB at boot); if allocating 2 fails there is no smaller fallback |
 
 ## Shim (`shim/`)
 POSIX pieces newlib/libctru lack: `<sys/mman.h>` with anonymous `mmap` on `memalign` (Fiber
@@ -69,3 +69,4 @@ removes the close-on-exec macros: libctru's `fcntl` only handles sockets, and Ru
   SystemStackError. Linux catches these with a guard page and SIGSEGV; the 3DS needs an
   equivalent (memory permissions + libctru exception handler).
 - `GC.compact` raises NotImplementedError.
+- Doubled slashes after a device are kept (`File.dirname("sdmc://a//b") == "sdmc://a"`).

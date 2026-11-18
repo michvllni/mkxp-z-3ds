@@ -7,6 +7,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Stack size in bytes of the thread that calls RUBY_INIT_STACK / ruby_init. libctru offers no
  * way to query it. 0 (default): main()'s stack, libctru's __stacksize__. Set it before
@@ -14,5 +18,9 @@
  * otherwise Ruby's stack overflow check uses the wrong limit.
  */
 extern size_t rb3ds_main_stack_size;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

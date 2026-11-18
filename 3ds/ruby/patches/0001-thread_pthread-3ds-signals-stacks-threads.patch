@@ -16,11 +16,12 @@ thread_pthread.c for newlib without sigaction (Nintendo 3DS):
 
 --- a/thread_pthread.c
 +++ b/thread_pthread.c
-@@ -188,7 +188,12 @@
+@@ -188,7 +188,13 @@
  static const rb_thread_t *sigwait_th;
  
  #ifdef HAVE_SCHED_YIELD
 +#ifdef __3DS__
++#include "rb3ds.h" /* rb3ds_main_stack_size, set by the embedder */
 +/* newlib's sched_yield() is an ENOSYS stub on devkitARM (see 3ds/ruby/shim) */
 +#define native_thread_yield() rb3ds_yield()
 +#else
@@ -29,7 +30,7 @@ thread_pthread.c for newlib without sigaction (Nintendo 3DS):
  #else
  #define native_thread_yield() ((void)0)
  #endif
-@@ -659,7 +664,11 @@
+@@ -659,7 +665,11 @@
      ruby_thread_set_native(th);
      fill_thread_id_str(th);
      native_thread_init(th);
@@ -41,7 +42,7 @@ thread_pthread.c for newlib without sigaction (Nintendo 3DS):
  }
  
  #ifdef RB_THREAD_T_HAS_NATIVE_ID
-@@ -961,6 +970,17 @@
+@@ -961,6 +971,16 @@
  	    space = (size_t)addr - ((size_t)((char *)addr - size) / pagesize + 1) * pagesize;
  	}
  	native_main_thread.stack_maxsize = space;
@@ -52,7 +53,6 @@ thread_pthread.c for newlib without sigaction (Nintendo 3DS):
 +	 * application may override). stack_start (set above from RUBY_INIT_STACK) lies close to its
 +	 * top; keep a margin for the frames above it and for C code beyond Ruby's checks. */
 +	extern uint32_t __stacksize__;
-+	extern size_t rb3ds_main_stack_size; /* 3ds/ruby/shim/include/rb3ds.h, set by the embedder */
 +	size_t size = rb3ds_main_stack_size ? rb3ds_main_stack_size : (size_t)__stacksize__;
 +	const size_t margin = 64 * 1024;
 +	native_main_thread.stack_maxsize = size > 2 * margin ? size - margin : size / 2;

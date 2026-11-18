@@ -71,21 +71,29 @@ mkdir -p "$BUILD"
 
 # 1. Source: meson unpacks and patches exactly like the desktop build. meson never updates an
 # unpacked tree, so it is unpacked again when the wrap or mkxp-z's packagefiles change.
+# The marker lives in the shared tree itself, so any number of build dirs agree on it.
+[ -d "$REPO/subprojects/packagefiles/ruby-3.1" ] \
+  || { echo "build.sh: subprojects/packagefiles/ruby-3.1 missing" >&2; exit 1; }
 UPSTREAM_ID="$( (cat "$REPO/subprojects/ruby-3.1.wrap"; cd "$REPO/subprojects/packagefiles" &&
   find ruby-3.1 -type f -print0 | sort -z | xargs -0 sha256sum) | sha256sum | cut -d' ' -f1)"
-if [ ! -f "$REPO/subprojects/$RUBY_DIR/configure" ] \
-   || [ "$(cat "$BUILD/.rb3ds-upstream" 2>/dev/null || true)" != "$UPSTREAM_ID" ]; then
-  rm -rf "${REPO:?}/subprojects/$RUBY_DIR"
+UPSTREAM_MARK="$REPO/subprojects/$RUBY_DIR/.rb3ds-upstream"
+if [ ! -f "$REPO/subprojects/$RUBY_DIR/configure" ]; then
   (cd "$REPO" && meson subprojects download ruby-3.1)
-  mkdir -p "$BUILD"
-  echo "$UPSTREAM_ID" >"$BUILD/.rb3ds-upstream"
-  rm -rf "$BUILD/src" "$BUILD/build"
+  echo "$UPSTREAM_ID" >"$UPSTREAM_MARK"
+elif [ "$(cat "$UPSTREAM_MARK" 2>/dev/null || true)" != "$UPSTREAM_ID" ]; then
+  if [ -f "$UPSTREAM_MARK" ]; then
+    # packagefiles or wrap changed since this tree was unpacked: unpack again
+    rm -rf "${REPO:?}/subprojects/$RUBY_DIR"
+    (cd "$REPO" && meson subprojects download ruby-3.1)
+  fi
+  # (no marker: a tree unpacked by the desktop build or before markers existed is current)
+  echo "$UPSTREAM_ID" >"$UPSTREAM_MARK"
 fi
 
 # 2. Private copy + 3DS patches; redone when the patch set or the wrap changes.
 # The force-included shim headers count as patches: Ruby's Makefile does not track them.
-PATCH_ID="$(cat "$REPO/subprojects/ruby-3.1.wrap" "$HERE"/patches/*.patch "$HERE"/shim/include/*.h \
-  "$HERE"/shim/include/sys/*.h | sha256sum | cut -d' ' -f1)"
+PATCH_ID="$( (echo "$UPSTREAM_ID"; cat "$HERE"/patches/*.patch "$HERE"/shim/include/*.h \
+  "$HERE"/shim/include/sys/*.h) | sha256sum | cut -d' ' -f1)"
 if [ "$(cat "$BUILD/src/.rb3ds-patches" 2>/dev/null || true)" != "$PATCH_ID" ]; then
   rm -rf "$BUILD/src" "$BUILD/build"
   cp -a "$REPO/subprojects/$RUBY_DIR" "$BUILD/src"
