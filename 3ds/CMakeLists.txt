@@ -12,7 +12,7 @@
 # Build (from the repository root, after 3ds/ruby/build.sh and 3ds/deps/build.sh):
 #   cmake -S 3ds -B build-3ds/mkxp -G Ninja -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/3DS.cmake"
 #   cmake --build build-3ds/mkxp            # -> build-3ds/mkxp/mkxp-z.3dsx
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.21) # file(COPY_FILE ... ONLY_IF_DIFFERENT) in cmake/git-hash.cmake
 project(mkxp_z_3ds C CXX)
 
 get_filename_component(MKXP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
@@ -28,21 +28,18 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(FREETYPE REQUIRED freetype2)
 pkg_check_modules(PHYSFS REQUIRED physfs)
 
-# Version: meson.build's project version; git hash as src/meson.build does it.
+# Version: meson.build's project version. Git hash: regenerated at every build (cmake/git-hash.cmake),
+# as meson's vcs_tag does in src/meson.build.
 file(READ "${MKXP_ROOT}/meson.build" MESON_BUILD)
 string(REGEX MATCH "version: *'([^']+)'" _ "${MESON_BUILD}")
 set(MKXPZ_VERSION "${CMAKE_MATCH_1}-3ds")
 find_package(Git QUIET)
-set(MKXPZ_GIT_HASH "unknown")
-if(GIT_FOUND)
-  execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD WORKING_DIRECTORY "${MKXP_ROOT}"
-                  OUTPUT_VARIABLE MKXPZ_GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-endif()
 set(GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/gen")
 file(MAKE_DIRECTORY "${GEN_DIR}")
-file(WRITE "${GEN_DIR}/git-hash.h.tmp"
-  "#ifndef MKXPZ_GIT_HASH\n#  define MKXPZ_GIT_HASH \"${MKXPZ_GIT_HASH}\"\n#endif\n")
-configure_file("${GEN_DIR}/git-hash.h.tmp" "${GEN_DIR}/git-hash.h" COPYONLY)
+add_custom_target(mkxp_git_hash
+  COMMAND "${CMAKE_COMMAND}" "-DROOT=${MKXP_ROOT}" "-DOUT=${GEN_DIR}/git-hash.h" "-DGIT=${GIT_EXECUTABLE}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/git-hash.cmake"
+  BYPRODUCTS "${GEN_DIR}/git-hash.h" VERBATIM)
 
 # Embedded files (shaders, bundled font), generated like assets/ and shader/meson.build do.
 set(EMBEDDED)
@@ -94,7 +91,7 @@ set(PLATFORM_SOURCES
   display/gl3ds.cpp)
 
 add_executable(mkxp-z ${UPSTREAM_SOURCES} ${PLATFORM_SOURCES})
-add_dependencies(mkxp-z mkxp_embedded)
+add_dependencies(mkxp-z mkxp_embedded mkxp_git_hash)
 set_target_properties(mkxp-z PROPERTIES CXX_STANDARD 14 CXX_EXTENSIONS ON C_STANDARD 11 C_EXTENSIONS ON)
 target_compile_definitions(mkxp-z PRIVATE
   MKXPZ_VERSION="${MKXPZ_VERSION}" HAVE_NANOSLEEP MKXPZ_INIT_GL_LATER

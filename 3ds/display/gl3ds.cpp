@@ -44,7 +44,10 @@ const GLubyte *APIENTRY getString(GLenum name) {
 
 void APIENTRY getIntegerv(GLenum pname, GLint *params) {
 	switch (pname) {
-	case GL_MAX_TEXTURE_SIZE: *params = 1024; break; // PICA200 limit
+	// The PICA200 limit is 1024 px, but mkxp-z sizes its tileset atlas by this value: with 1024,
+	// tilesets taller than about 1300 px are rejected. The table reports a desktop-like limit;
+	// the citro3d implementation stores larger textures as several <= 1024 px pieces.
+	case GL_MAX_TEXTURE_SIZE: *params = 4096; break;
 	case GL_MAX_TEXTURE_IMAGE_UNITS: *params = 3; break;
 	case GL_MAX_VERTEX_ATTRIBS: *params = 12; break;
 	case GL_VIEWPORT: params[0] = params[1] = 0; params[2] = 400; params[3] = 240; break;

@@ -28,7 +28,10 @@ involved.
   reaches the GPU. On the 3DS it is `display/gl3ds.cpp`, an implementation of that GL ES 2 subset
   for the PICA200 (rmxp3ds `docs/DECISIONS.md` D14). **Current state:** bookkeeping only. Object
   names, compile and link status and uniform locations work, but nothing is drawn, and
-  `ReadPixels` returns transparent black. The citro3d implementation comes next.
+  `ReadPixels` returns transparent black. The citro3d implementation comes next. It must:
+  - store textures larger than the PICA200's 1024 px as several pieces (the table reports 4096,
+    so mkxp-z's tileset atlas fits real tilesets);
+  - honour `GL_UNPACK_ROW_LENGTH`/`SKIP_*` in `TexSubImage2D` (`gl.unpack_subimage` is set).
 - **3DS replacements** for desktop-only files:
 
 | Upstream | 3DS | |
@@ -44,8 +47,9 @@ involved.
 - **Hooks in upstream files**, all marked `mkxp-z-3ds` and inert on other platforms:
   - `src/system/system.h`: `MKXPZ_PLATFORM_3DS`.
   - `binding/binding-mri.cpp`: `System.platform` returns "Nintendo 3DS".
-  - `src/display/graphics.cpp`: movie playback (Theora + OpenAL) is left out; `Graphics.play_movie`
-    raises.
+  - `src/display/graphics.cpp`: movie playback (Theora + OpenAL) is left out;
+    `Graphics.play_movie` logs and returns, as if the movie had ended.
+  - `src/input/input.cpp`: `Input.controller_name` returns "Nintendo 3DS".
 - **MIDI:** fluidsynth is loaded at run time as on desktop. That fails on the 3DS, so MIDI is
   disabled.
 
@@ -67,12 +71,19 @@ involved.
   | D-pad or circle pad | directions |
 
   These are mkxp-z's default controller bindings.
-- **Logs:** without 3dslink, stderr (Ruby errors, `Debug()` output, `print`/`msgbox` text) goes to
-  `sdmc:/rmxp3ds/mkxp-stderr.txt`. A fatal error is shown on the bottom screen until START is
-  pressed (it exits after 3 s when `sdmc:/rmxp3ds/test/autoexit` exists).
+- **Logs and messages:**
+  - Without 3dslink, stderr (Ruby errors, `Debug()` output, `print`/`msgbox` text) goes to
+    `sdmc:/rmxp3ds/mkxp-stderr.txt`.
+  - Message boxes are printed on the bottom-screen console and do not block. A blocking box needs
+    the renderer.
+  - When the game ends with an error, or after a message box (e.g. an uncaught Ruby exception),
+    the message stays on the bottom screen until START is pressed. With
+    `sdmc:/rmxp3ds/test/autoexit` it exits after 3 s.
+- **HOME menu and sleep mode** pause the game at its next `Graphics.update` (APT hook,
+  `SyncPoint`).
 
 ## Known limitations (this stage)
 - **No picture yet:** the GL function table does not draw. Bitmap pixel reads (`get_pixel`) return
   0.
-- No sound, no movies, no HTTP.
+- No sound, no movies (skipped), no HTTP.
 - RGSS2/3 classes are compiled but out of scope (rmxp3ds D4).

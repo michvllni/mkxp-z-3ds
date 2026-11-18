@@ -68,17 +68,18 @@ PREFIX="$BUILD/prefix"
 mkdir -p "$BUILD" "$DL" "$PREFIX"
 # Inputs besides the versions: this script, the CMake toolchain file, the compiler and newlib,
 # libctru, and the portlibs archives SDL2_image and SDL2_ttf link (libpng, libjpeg, FreeType and
-# FreeType's zlib and bzip2). Archives, not .pc files: a same-version package rebuild counts too.
+# FreeType's zlib and bzip2), devkitPro's meson cross-file generator and the meson version.
+# Archives, not .pc files: a same-version package rebuild counts too.
 PORTLIBS="$DEVKITPRO/portlibs/3ds"
 INPUTS=("$0" "$TOOLCHAIN" "$(command -v arm-none-eabi-gcc)"
   "$(arm-none-eabi-gcc -march=armv6k -mtune=mpcore -mfloat-abi=hard -print-file-name=libc.a)"
   "$DEVKITPRO/libctru/lib/libctru.a"
   "$PORTLIBS/lib/libpng16.a" "$PORTLIBS/lib/libjpeg.a" "$PORTLIBS/lib/libfreetype.a"
-  "$PORTLIBS/lib/libz.a" "$PORTLIBS/lib/libbz2.a")
+  "$PORTLIBS/lib/libz.a" "$PORTLIBS/lib/libbz2.a" "$DEVKITPRO/meson-toolchain.sh")
 for f in "${INPUTS[@]}"; do
   [ -f "$f" ] || { echo "build.sh: $f missing" >&2; exit 1; }
 done
-INPUT_ID="$(sha256sum "${INPUTS[@]}" | cut -d' ' -f1 | sha256sum | cut -d' ' -f1)"
+INPUT_ID="$( (sha256sum "${INPUTS[@]}" | cut -d' ' -f1; meson --version) | sha256sum | cut -d' ' -f1)"
 
 # fetch NAME URL SHA256: downloads URL to DL/NAME unless present with the right checksum.
 fetch() {
@@ -104,8 +105,10 @@ build_lib() {
   fi
   fetch "$archive" "$url" "$sum"
   # files an older version of this library installed (SDL2 itself: the prefix is cleared below)
-  rm -rf "$PREFIX/include/SDL2/SDL_${name#SDL2_}.h" \
-    "$PREFIX/lib/cmake/$name" "$PREFIX/lib/pkgconfig/$name.pc" "$PREFIX/lib/lib${LIBNAME:-$name}.a"
+  local lib="${LIBNAME:-$name}"
+  rm -rf "$PREFIX/include/SDL2/SDL_${name#SDL2_}.h" "$PREFIX/include/$name" "$PREFIX/include/$lib" \
+    "$PREFIX/lib/cmake/$name" "$PREFIX/lib/pkgconfig/$name.pc" "$PREFIX/lib/pkgconfig/$lib.pc" \
+    "$PREFIX/lib/lib$lib.a"
   rm -rf "$BUILD/src/$name-$version" "$BUILD/build/$name"
   mkdir -p "$BUILD/src" "$BUILD/build"
   tar -xf "$DL/$archive" -C "$BUILD/src"
@@ -137,8 +140,8 @@ build_lib() {
 }
 
 # SDL2 first: the other two find it through CMAKE_PREFIX_PATH. When SDL2 must be rebuilt, the
-# whole prefix is cleared (no stale headers, CMake or pkg-config files of an older version) and the
-# other two are rebuilt as well.
+# whole prefix is cleared (no stale headers, CMake or pkg-config files of an older version) and all
+# the others are rebuilt as well.
 SDL2_VERSION=2.32.10
 if [ "$(cat "$BUILD/.SDL2.stamp" 2>/dev/null || true)" != "$SDL2_VERSION $INPUT_ID" ] || [ ! -f "$PREFIX/lib/libSDL2.a" ]; then
   rm -rf "$PREFIX" "$BUILD"/.SDL2*.stamp
