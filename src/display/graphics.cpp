@@ -21,7 +21,9 @@
 
 #include "graphics.h"
 
+#ifndef __3DS__ // mkxp-z-3ds: no OpenAL/Theora movie playback on the 3DS
 #include "alstream.h"
+#endif
 #include "audio.h"
 #include "binding.h"
 #include "bitmap.h"
@@ -56,7 +58,9 @@
 #include "steamshim_child.h"
 #endif
 
+#ifndef __3DS__
 #include <theoraplay.h>
+#endif
 
 #include <algorithm>
 #include <errno.h>
@@ -78,6 +82,7 @@
 #define MOVIE_AUDIO_BUFFER_SIZE 2048
 #define AUDIO_BUFFER_LEN_MS 2000
 
+#ifndef __3DS__ // mkxp-z-3ds: movie playback (Theora + OpenAL), see Graphics::playMovie
 typedef struct AudioQueue
 {
     const THEORAPLAY_AudioPacket *audio;
@@ -463,6 +468,7 @@ struct MovieOpenHandler : FileSystem::OpenHandler
         return true;
     }
 };
+#endif // __3DS__
 
 struct PingPong {
     TEXFBO rt[2];
@@ -1552,6 +1558,12 @@ bool Graphics::updateMovieInput(Movie *movie) {
 }
 
 void Graphics::playMovie(const char *filename, int volume_, bool skippable) {
+#ifdef __3DS__
+    // No Theora/OpenAL on the 3DS: skip the movie, as if it had ended, so the game continues.
+    Debug() << "Movie playback is not available on the Nintendo 3DS, skipping" << filename;
+    (void)volume_;
+    (void)skippable;
+#else
     if (shState->config().enableHires) {
         Debug() << "BUG: High-res Graphics playMovie not implemented";
     }
@@ -1584,6 +1596,7 @@ void Graphics::playMovie(const char *filename, int volume_, bool skippable) {
     }
     
     delete movie;
+#endif // __3DS__
 }
 
 void Graphics::screenshot(const char *filename) {

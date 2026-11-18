@@ -426,6 +426,8 @@ RB_METHOD(mkxpPlatform) {
                 break;
         }
     }
+#elif MKXPZ_PLATFORM == MKXPZ_PLATFORM_3DS // mkxp-z-3ds
+    std::string platform("Nintendo 3DS");
 #else
     std::string platform("Linux");
 #endif
@@ -1177,6 +1179,9 @@ static void showExc(VALUE exc, const BacktraceData &btData) {
     snprintf(&ms[0], ms.size(), "Script '%s' line %s: %s occurred.\n\n%s",
              file.c_str(), line, RSTRING_PTR(name), RSTRING_PTR(msg));
     
+#ifdef __3DS__ // mkxp-z-3ds: message boxes do not block; main() shows the error at exit
+    shState->rtData().rgssErrorMsg = ms.c_str();
+#endif
     showMsg(ms);
 }
 

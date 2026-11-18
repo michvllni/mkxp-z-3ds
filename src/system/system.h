@@ -14,8 +14,11 @@
 #define MKXPZ_PLATFORM_MACOS 1
 #define MKXPZ_PLATFORM_LINUX 2
 #define MKXPZ_PLATFORM_BSD 3
+#define MKXPZ_PLATFORM_3DS 4 // mkxp-z-3ds: Nintendo 3DS (3ds/)
 
-#ifdef __WIN32__
+#if defined __3DS__
+#define MKXPZ_PLATFORM MKXPZ_PLATFORM_3DS
+#elif defined __WIN32__
 #define MKXPZ_PLATFORM MKXPZ_PLATFORM_WINDOWS
 #elif defined __APPLE__
 #define MKXPZ_PLATFORM MKXPZ_PLATFORM_MACOS
