@@ -165,3 +165,18 @@ int execle(const char *path, const char *arg, ...) {
 	errno = ENOSYS;
 	return -1;
 }
+
+// --- Thread priority (see rb3ds_compat.h). ---------------------------------------------------
+#include <3ds/services/apt.h>
+#include <3ds/thread.h>
+
+void rb3ds_thread_created(pthread_t thread) {
+	s32 prio = 0x30;
+	if (R_FAILED(svcGetThreadPriority(&prio, CUR_THREAD_HANDLE))) prio = 0x30;
+	// libsysbase's pthread_t is libctru's Thread (libctru source/system/syscalls.c).
+	svcSetThreadPriority(threadGetHandle((Thread)thread), prio);
+}
+
+void rb3ds_yield(void) {
+	svcSleepThread(0);
+}

@@ -35,7 +35,7 @@ headers in `build/.ext/include/arm-eabi` and `src/include`. Link them in one gro
 ## Patches (`patches/`, applied in order)
 | Patch | Why |
 |---|---|
-| 0001 thread_pthread | `signal()` instead of `posix_signal()`; main-thread stack size from libctru's `__stacksize__` (otherwise no stack overflow detection) |
+| 0001 thread_pthread | `signal()` instead of `posix_signal()`; main-thread stack size from libctru's `__stacksize__` (otherwise no stack overflow detection); thread stacks sized and located; new threads at the creator's priority; `native_thread_yield` via `svcSleepThread(0)` (newlib's `sched_yield` is an ENOSYS stub) |
 | 0002 gc | no read-barrier signal handlers without sigaction (compaction is unavailable anyway) |
 | 0003 file | `sdmc:/`, `romfs:/` are absolute paths |
 | 0004 coroutine/arm32 | save d8–d15 in Fiber switches (hard-float AAPCS) |
@@ -43,15 +43,18 @@ headers in `build/.ext/include/arm-eabi` and `src/include`. Link them in one gro
 ## Shim (`shim/`)
 POSIX pieces newlib/libctru lack: `<sys/mman.h>` with anonymous `mmap` on `memalign` (Fiber
 stacks), `waitpid`, `get*id`, `getrusage` (from the system tick), no-op `pthread_kill`,
-`umask`, `setmode`; `pipe`, `popen`, `exec*`, `chown` fail with `ENOSYS`.
+`umask`, `setmode`; `pipe`, `popen`, `exec*`, `chown` fail with `ENOSYS`; `rb3ds_thread_created`
+(gives a new thread the creator's priority: libctru creates pthreads at 0x3F, and the 3DS never
+runs a lower-priority thread while a higher one is runnable) and `rb3ds_yield`.
 `rb3ds_compat.h` is force-included into Ruby's core objects (not into configure tests) and
 removes the close-on-exec macros: libctru's `fcntl` only handles sockets, and Ruby would call
 `rb_bug` on the first `File.open`.
 
 ## Known limitations
-- **Threads:** `Thread.new { }.value` hangs. The timer thread's pipe cannot be created
-  ("scheduling broken" warning) and thread hand-off does not work yet. Single-threaded Ruby
-  (what mkxp-z runs) works.
+- **Threads:** creation, `join`/`value`, `Thread.pass`, Queue, Mutex, ConditionVariable and
+  `sleep` work (patch 0001 + shim: thread stacks, creator's priority, a real yield). There is no
+  preemption: the timer thread's pipe cannot be created ("scheduling broken" warning), so a
+  CPU-bound thread runs until it blocks, sleeps or passes. mkxp-z runs Ruby single-threaded.
 - **Deep C recursion:** C paths that bypass Ruby's explicit stack check (e.g. very deep nested
   `inspect`, ~2000 levels with a 1 MiB stack) overflow the stack instead of raising
   SystemStackError. Linux catches these with a guard page and SIGSEGV; the 3DS needs an

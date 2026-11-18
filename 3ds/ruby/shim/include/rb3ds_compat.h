@@ -28,6 +28,19 @@
 #undef F_GETFD
 #undef F_SETFD
 
+/*
+ * Called by thread_pthread.c right after pthread_create: gives the new thread the creator's
+ * priority. libctru creates pthreads at the lowest priority (0x3F) and the 3DS kernel never runs a
+ * lower-priority thread while a higher one is runnable, so GVL hand-offs (Thread.pass, Queue,
+ * ConditionVariable) would never reach it. Equal priorities take turns on sched_yield.
+ */
+#include <pthread.h>
+void rb3ds_thread_created(pthread_t thread);
+
+/* Yield the CPU to another thread of the same priority. newlib's sched_yield() on devkitARM is a
+ * stub returning ENOSYS, so thread_pthread.c's native_thread_yield() uses this instead. */
+void rb3ds_yield(void);
+
 /* DOS-style text/binary mode switch; files are always binary on the 3DS. */
 int setmode(int fd, int mode);
 
