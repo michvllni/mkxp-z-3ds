@@ -219,9 +219,37 @@ inline size_t tiledOffset(u32 x, u32 y, u32 pw) {
 
 // ---- frames and render targets -----------------------------------------------------------------
 
+// HOME and sleep mode. citro3d's APT hook runs on the main thread (aptMainLoop) and, on suspend,
+// waits for the GX queue and clears it (base.c C3Di_AptEventHook -> C3Di_WaitAndClearQueue). The
+// RGSS thread draws at the same time: while a citro3d frame is open the queue is stopped, so the
+// wait returns at once (libctru gxqueue.c gxCmdQueueWait), the queue is cleared under the RGSS
+// thread, and it keeps submitting GPU work after the app gave up the GPU.
+// gpuLock is held by the RGSS thread while a frame is open (beginFrame..endFrame) and while it
+// waits for GPU work outside a frame. Our APT hook takes it on suspend and sleep, so rendering
+// pauses at a frame boundary before citro3d's hook runs (libctru calls the newest hook first;
+// ours is registered after C3D_Init). The main loop releases it once aptMainLoop returns, after
+// citro3d's restore hook (gl3dsAptResumed).
+RecursiveLock gpuLock;
+aptHookCookie aptCookie;
+bool aptHeld = false; // main thread only
+
+struct GpuScope {
+	GpuScope() { RecursiveLock_Lock(&gpuLock); }
+	~GpuScope() { RecursiveLock_Unlock(&gpuLock); }
+};
+
+void onAptEvent(APT_HookType type, void *) {
+	if ((type == APTHOOK_ONSUSPEND || type == APTHOOK_ONSLEEP) && !aptHeld) {
+		RecursiveLock_Lock(&gpuLock);
+		aptHeld = true;
+	}
+}
+
 void initC3D() {
 	if (st.c3dReady) return;
+	RecursiveLock_Init(&gpuLock);
 	if (!C3D_Init(CMDBUF_BYTES)) throw Exception(Exception::MKXPError, "gl3ds: C3D_Init failed (out of linear memory)");
+	aptHook(&aptCookie, onAptEvent, nullptr); // after C3D_Init: runs before citro3d's hook
 	st.top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, C3D_DEPTHTYPE(-1));
 	if (!st.top) throw Exception(Exception::MKXPError, "gl3ds: cannot create the top screen render target (out of VRAM)");
 	C3D_RenderTargetSetOutput(st.top, GFX_TOP, GFX_LEFT,
@@ -268,6 +296,7 @@ void endFrame(bool present = false) {
 	C3D_FrameEnd(0); // also flushes the CPU data cache of the linear heap (vertices, textures)
 	st.inFrame = false;
 	st.frameSerial++;
+	RecursiveLock_Unlock(&gpuLock); // taken in beginFrame
 }
 
 // Waits until the GPU has finished every submitted frame (outside a frame), then frees the
@@ -275,6 +304,7 @@ void endFrame(bool present = false) {
 // empty frame submits nothing (GX_CMDLIST_FLUSH skips the linear heap cache flush).
 void waitGpu() {
 	initC3D();
+	GpuScope lock;
 	C3D_FrameBegin(0);
 	C3D_FrameEnd(GX_CMDLIST_FLUSH);
 	st.completedSerial = st.frameSerial - 1;
@@ -295,6 +325,7 @@ void syncIfUsed(const Tex &t) {
 void beginFrame() {
 	initC3D();
 	if (st.inFrame) return;
+	RecursiveLock_Lock(&gpuLock); // held until endFrame (see gpuLock)
 	// C3D_FrameBegin waits for the previous frame anyway: free what it may have used first
 	// (render targets can only be deleted outside a frame).
 	if (!st.deadTargets.empty() || !st.deadTextures.empty()) waitGpu();
@@ -341,6 +372,7 @@ void prepareCpuWrite(Tex &t, bool keepContent) {
 // Moves a VRAM texture back to linear memory (GPU idle, outside a frame). False if linear memory
 // is full.
 bool evictToLinear(Tex &t) {
+	GpuScope lock;
 	C3D_Tex lin;
 	if (!allocLinear(&lin, t.pw, t.ph)) return false;
 	// The CPU cannot access VRAM on the console (citro3d texture.c: "CPU can't write to VRAM";
@@ -1440,6 +1472,12 @@ void APIENTRY deleteVertexArrays(GLsizei n, const GLuint *a) {
 }
 void APIENTRY bindVertexArray(GLuint a) { st.boundVertexArray = a; }
 } // namespace
+
+void gl3dsAptResumed() {
+	if (!aptHeld) return;
+	aptHeld = false;
+	RecursiveLock_Unlock(&gpuLock);
+}
 
 void gl3dsPresent() {
 	beginFrame(); // a frame with nothing drawn still shows the (cleared) screen

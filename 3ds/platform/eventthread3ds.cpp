@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "debugwriter.h"
+#include "gl3ds.h"
 #include "sharedstate.h"
 
 uint8_t EventThread::keyStates[];
@@ -65,7 +66,9 @@ void EventThread::process(RGSSThreadData &rtData) {
 	memset(&controllerState, 0, sizeof controllerState);
 	memset(keyStates, 0, sizeof keyStates);
 	while (!rtData.rqTermAck) {
-		if (!aptMainLoop()) {
+		bool running = aptMainLoop();
+		gl3dsAptResumed(); // rendering paused for HOME or sleep mode continues
+		if (!running) {
 			rtData.rqTerm.set();
 			break;
 		}

@@ -31,6 +31,7 @@
 #include "eventthread.h"
 #include "exception.h"
 #include "gl-fun.h"
+#include "gl3ds.h"
 #include "keybindings.h"
 #include "rb3ds.h"
 #include "sharedstate.h"
@@ -165,6 +166,7 @@ int main(int argc, char *argv[]) {
 		printf("\n%s\n\nPress START to exit.\n", error.c_str());
 		bool autoexit = access("sdmc:/rmxp3ds/test/autoexit", F_OK) == 0;
 		for (int frame = 0; aptMainLoop() && !(autoexit && frame > 180); ++frame) {
+			gl3dsAptResumed(); // releases rendering paused for HOME/sleep (nothing renders any more)
 			hidScanInput();
 			if (hidKeysDown() & KEY_START) break;
 			gspWaitForVBlank();
