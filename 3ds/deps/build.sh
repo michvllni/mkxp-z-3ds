@@ -17,8 +17,8 @@
 #   (SDL2, SDL2_image: GitHub's asset digests; SDL2_ttf: signature by the SDL release key
 #   1528635D8053A57F77D1E08630A59377A7763BE6, checked when pinning).
 #   Output: DIR/prefix/{include,lib} with CMake and pkg-config files. Each library is rebuilt
-#   only when its version, this script, the compiler, the CMake toolchain file,
-#   libctru or the linked portlibs change. Needs DEVKITPRO, cmake, ninja.
+#   only when its version, this script, the compiler or newlib, the CMake toolchain
+#   file, libctru or the linked portlibs archives change, or when it is missing. Needs DEVKITPRO, cmake, ninja.
 #
 # OPTIONS
 #   --build-dir DIR     build directory (default: build-3ds/deps in the repository root)
@@ -62,13 +62,19 @@ TOOLCHAIN="$DEVKITPRO/cmake/3DS.cmake"
 DL="${DL:-$BUILD/download}"
 PREFIX="$BUILD/prefix"
 mkdir -p "$BUILD" "$DL" "$PREFIX"
-# Inputs besides the versions: this script, the compiler, the CMake toolchain file, libctru and
-# the portlibs SDL2_image/SDL2_ttf link (libpng, libjpeg, FreeType).
+# Inputs besides the versions: this script, the CMake toolchain file, the compiler and newlib,
+# libctru, and the portlibs archives SDL2_image and SDL2_ttf link (libpng, libjpeg, FreeType and
+# FreeType's zlib and bzip2). Archives, not .pc files: a same-version package rebuild counts too.
 PORTLIBS="$DEVKITPRO/portlibs/3ds"
-INPUT_ID="$( (sha256sum "$0" "$TOOLCHAIN" "$DEVKITPRO/libctru/lib/libctru.a" \
-  "$PORTLIBS/lib/pkgconfig/libpng.pc" "$PORTLIBS/lib/pkgconfig/libjpeg.pc" \
-  "$PORTLIBS/lib/pkgconfig/freetype2.pc" | cut -d' ' -f1; arm-none-eabi-gcc -dumpfullversion) \
-  | sha256sum | cut -d' ' -f1)"
+INPUTS=("$0" "$TOOLCHAIN" "$(command -v arm-none-eabi-gcc)"
+  "$(arm-none-eabi-gcc -march=armv6k -mtune=mpcore -mfloat-abi=hard -print-file-name=libc.a)"
+  "$DEVKITPRO/libctru/lib/libctru.a"
+  "$PORTLIBS/lib/libpng16.a" "$PORTLIBS/lib/libjpeg.a" "$PORTLIBS/lib/libfreetype.a"
+  "$PORTLIBS/lib/libz.a" "$PORTLIBS/lib/libbz2.a")
+for f in "${INPUTS[@]}"; do
+  [ -f "$f" ] || { echo "build.sh: $f missing" >&2; exit 1; }
+done
+INPUT_ID="$(sha256sum "${INPUTS[@]}" | cut -d' ' -f1 | sha256sum | cut -d' ' -f1)"
 
 # fetch NAME URL SHA256: downloads URL to DL/NAME unless present with the right checksum.
 fetch() {
@@ -91,6 +97,9 @@ build_lib() {
     return
   fi
   fetch "$archive" "$url" "$sum"
+  # files an older version of this library installed (SDL2 itself: the prefix is cleared below)
+  rm -rf "$PREFIX/include/SDL2/SDL_${name#SDL2_}.h" \
+    "$PREFIX/lib/cmake/$name" "$PREFIX/lib/pkgconfig/$name.pc" "$PREFIX/lib/lib$name.a"
   rm -rf "$BUILD/src/$name-$version" "$BUILD/build/$name"
   mkdir -p "$BUILD/src" "$BUILD/build"
   tar -xzf "$DL/$archive" -C "$BUILD/src"

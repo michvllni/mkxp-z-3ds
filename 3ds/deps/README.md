@@ -17,14 +17,15 @@ Needs devkitARM/libctru (`DEVKITPRO`), cmake and ninja. The rmxp3ds dev containe
 
 Each library is downloaded once, checked against its SHA-256, configured with devkitPro's
 `cmake/3DS.cmake` and installed into `build-3ds/deps/prefix` (`include/SDL2`, `lib/*.a`, CMake and
-pkg-config files). A library is rebuilt when its version, `build.sh`, the compiler, the CMake
-toolchain file, libctru or the portlibs it links change, or when it is missing from the prefix. A
+pkg-config files). A library is rebuilt when its version, `build.sh`, the compiler or newlib, the
+CMake toolchain file, libctru or the portlibs archives it links (libpng, libjpeg, FreeType, zlib,
+bzip2) change, or when it is missing from the prefix. A
 rebuilt SDL2 clears the prefix and rebuilds the other two.
 
 | Library | Version | Configuration | License |
 |---|---|---|---|
 | [SDL2](https://github.com/libsdl-org/SDL) | 2.32.10 | static; video, render, audio, joystick, haptic, sensor, hidapi off; threads, timers, RWops, surfaces and blits on | zlib |
-| [SDL2_image](https://github.com/libsdl-org/SDL_image) | 2.8.12 | PNG via libpng 1.6.53 and JPEG via libjpeg-turbo from devkitPro's 3DS portlibs (not stb_image, which needs about compressed + 2× raw size at peak, double libpng's), plus BMP, GIF, TGA and other formats without dependencies; no AVIF, JXL, TIFF, WebP | zlib; contains miniz (MIT, PNG saving), tiny_jpeg (public domain, JPEG saving), nanosvg (zlib) |
+| [SDL2_image](https://github.com/libsdl-org/SDL_image) | 2.8.12 | PNG via libpng 1.6.53 and JPEG via libjpeg-turbo from devkitPro's 3DS portlibs (not stb_image, which needs about compressed + 2× raw size at peak, double libpng's), plus BMP, GIF, TGA and other formats without dependencies; no AVIF, JXL, TIFF, WebP | zlib; contains nanosvg (zlib) and qoi (MIT); PNG/JPEG saving goes through libpng/libjpeg |
 | [SDL2_ttf](https://github.com/libsdl-org/SDL_ttf) | 2.24.0 | FreeType 2.14.1 from devkitPro's 3DS portlibs, no HarfBuzz | zlib |
 
 Portlibs linked from devkitPro: FreeType (FTL or GPLv2; under the FTL, binary releases must
