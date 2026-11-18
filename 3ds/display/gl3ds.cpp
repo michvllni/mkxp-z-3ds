@@ -334,9 +334,11 @@ void prepareCpuWrite(Tex &t, bool keepContent) {
 bool evictToLinear(Tex &t) {
 	C3D_Tex lin;
 	if (!allocLinear(&lin, t.pw, t.ph)) return false;
-	GSPGPU_InvalidateDataCache(t.tex.data, t.tex.size); // written by the GPU
-	memcpy(lin.data, t.tex.data, t.tex.size);
-	C3D_TexFlush(&lin);
+	// The CPU cannot access VRAM on the console (citro3d texture.c: "CPU can't write to VRAM";
+	// a CPU write is a permission fault, Azahar allows it): copy with the GX engine. Outside a
+	// frame C3D_SyncTextureCopy waits for the copy.
+	C3D_SyncTextureCopy((u32 *)t.tex.data, 0, (u32 *)lin.data, 0, t.tex.size, GX_TRANSFER_RAW_COPY(1));
+	GSPGPU_InvalidateDataCache(lin.data, lin.size); // written by the GPU
 	if (t.target) C3D_RenderTargetDelete(t.target);
 	t.target = nullptr;
 	C3D_TexDelete(&t.tex);
@@ -367,6 +369,20 @@ bool allocVram(Tex &need, C3D_Tex *out) {
 	}
 }
 
+// Before the CPU reads or writes a texture's memory: a texture in VRAM (a render target) moves
+// back to linear memory first, the CPU cannot access VRAM on the console. A later draw into it
+// moves it to VRAM again. False if linear memory is full.
+bool makeCpuAccessible(Tex &t) {
+	if (!t.inVram) return true;
+	syncGpu(); // draws into it must be done; eviction needs the GPU idle
+	if (evictToLinear(t)) {
+		t.useSerial = 0;
+		return true;
+	}
+	warnOnce("out of linear memory: texture in VRAM not accessible");
+	return false;
+}
+
 // Texture bound to the current framebuffer (nullptr for the screen or an incomplete framebuffer).
 Tex *framebufferTexture() {
 	if (st.framebuffer == 0) return nullptr;
@@ -392,9 +408,11 @@ C3D_RenderTarget *currentTarget(bool *screen, Tex **texOut) {
 			warnOnce("out of VRAM for render targets (" + std::to_string(t->pw) + "x" + std::to_string(t->ph) + ")");
 			return nullptr;
 		}
-		memcpy(vram.data, t->tex.data, t->tex.size);
-		GSPGPU_FlushDataCache(vram.data, vram.size);
-		st.deadTextures.push_back(t->tex);
+		// GX copy (the CPU cannot write VRAM), queued in the frame before the draws that follow
+		C3D_TexFlush(&t->tex);
+		beginFrame();
+		C3D_SyncTextureCopy((u32 *)t->tex.data, 0, (u32 *)vram.data, 0, t->tex.size, GX_TRANSFER_RAW_COPY(1));
+		st.deadTextures.push_back(t->tex); // freed once the GPU is done (the copy reads it)
 		t->tex = vram;
 		t->inVram = true;
 	}
@@ -407,6 +425,10 @@ C3D_RenderTarget *currentTarget(bool *screen, Tex **texOut) {
 // Clears a texture that is still in linear memory on the CPU (scissor box if enabled), so that
 // creating and filling a bitmap does not move it to VRAM.
 void cpuClear(Tex &t, const float *color) {
+	if (t.inVram) { // never: clear() draws a quad for VRAM textures
+		warnOnce("BUG: CPU clear of a VRAM texture skipped");
+		return;
+	}
 	GLint x0 = 0, y0 = 0, x1 = t.w, y1 = t.h;
 	if (st.scissorTest) {
 		x0 = std::max(x0, st.scissor[0]);
@@ -1076,6 +1098,7 @@ void APIENTRY readPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, 
 		warnOnce("ReadPixels only supports texture framebuffers");
 		return;
 	}
+	if (!makeCpuAccessible(*t)) return;
 	syncIfUsed(*t); // queued or running draws into it
 	GSPGPU_InvalidateDataCache(t->tex.data, t->tex.size);
 	const uint8_t *src = (const uint8_t *)t->tex.data;
@@ -1159,6 +1182,10 @@ void APIENTRY bindTexture(GLenum, GLuint t) { st.boundTex[st.activeUnit] = t; }
 
 // Copies rows of RGBA bytes (GL order: first row = t 0) into the tiled texture at (x, y).
 void uploadRect(Tex &t, GLint x, GLint y, GLsizei w, GLsizei h, const uint8_t *data, GLenum format) {
+	if (t.inVram) { // never: callers move the texture to linear memory first
+		warnOnce("BUG: CPU upload into a VRAM texture skipped");
+		return;
+	}
 	GLint rowLen = st.unpackRowLength > 0 ? st.unpackRowLength : w;
 	data += ((size_t)st.unpackSkipRows * rowLen + st.unpackSkipPixels) * 4;
 	uint8_t *dst = (uint8_t *)t.tex.data;
@@ -1178,7 +1205,9 @@ void uploadRect(Tex &t, GLint x, GLint y, GLsizei w, GLsizei h, const uint8_t *d
 void APIENTRY texImage2D(GLenum, GLint, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum, const GLvoid *data) {
 	Tex *t = texture(st.boundTex[st.activeUnit]);
 	if (!t) return;
-	if (t->allocated && (t->w != w || t->h != h)) releaseTex(*t); // freed when the GPU is done with it
+	// freed when the GPU is done with it; a texture in VRAM gets new linear memory (its content is
+	// replaced anyway, and the CPU cannot write VRAM)
+	if (t->allocated && (t->w != w || t->h != h || t->inVram)) releaseTex(*t);
 	t->w = w, t->h = h;
 	if (w > MAX_TEX || h > MAX_TEX) {
 		warnOnce("texture larger than 1024 px not supported yet: " + std::to_string(w) + "x" + std::to_string(h));
@@ -1205,6 +1234,7 @@ void APIENTRY texSubImage2D(GLenum, GLint, GLint x, GLint y, GLsizei w, GLsizei 
 	Tex *t = texture(st.boundTex[st.activeUnit]);
 	if (!t || !t->allocated || !data) return;
 	if (x < 0 || y < 0 || x + w > t->w || y + h > t->h) return;
+	if (!makeCpuAccessible(*t)) return;
 	prepareCpuWrite(*t, true); // draws queued before must see the old content
 	uploadRect(*t, x, y, w, h, (const uint8_t *)data, format);
 	C3D_TexFlush(&t->tex);
