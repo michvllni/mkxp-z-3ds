@@ -157,6 +157,10 @@ struct State {
 	// finished on the GPU.
 	u32 frameSerial = 1;
 	u32 completedSerial = 0;
+	// GX queue entries used by the frame being built: citro3d's queue holds 32 (base.c
+	// gxQueue.maxEntries) until C3D_FrameBegin empties it; libctru panics when it is full
+	// (gxqueue.c). An in-frame C3D_SyncTextureCopy adds two (command list split + copy).
+	int gxEntries = 0;
 	C3D_RenderTarget *top = nullptr;
 	shaderProgram_s shader;
 	DVLB_s *dvlb = nullptr;
@@ -298,6 +302,7 @@ void beginFrame() {
 	st.completedSerial = st.frameSerial - 1;
 	st.inFrame = true;
 	st.ringUsed = 0;
+	st.gxEntries = 0;
 }
 
 Tex *texture(GLuint name) {
@@ -339,9 +344,13 @@ bool evictToLinear(Tex &t) {
 	C3D_Tex lin;
 	if (!allocLinear(&lin, t.pw, t.ph)) return false;
 	// The CPU cannot access VRAM on the console (citro3d texture.c: "CPU can't write to VRAM";
-	// a CPU write is a permission fault, Azahar allows it): copy with the GX engine. Outside a
-	// frame C3D_SyncTextureCopy waits for the copy.
+	// a CPU write is a permission fault, Azahar allows it): copy with the GX engine. Called
+	// outside a frame. No dirty cache lines may be written back over the copy (flush first), and
+	// C3D_SyncTextureCopy's gspWaitForPPF can return early (the PPF event stays latched from
+	// earlier transfers), so wait for the GX queue explicitly before using or freeing anything.
+	GSPGPU_FlushDataCache(lin.data, lin.size);
 	C3D_SyncTextureCopy((u32 *)t.tex.data, 0, (u32 *)lin.data, 0, t.tex.size, GX_TRANSFER_RAW_COPY(1));
+	waitGpu();
 	GSPGPU_InvalidateDataCache(lin.data, lin.size); // written by the GPU
 	if (t.target) C3D_RenderTargetDelete(t.target);
 	t.target = nullptr;
@@ -415,6 +424,11 @@ C3D_RenderTarget *currentTarget(bool *screen, Tex **texOut) {
 		// GX copy (the CPU cannot write VRAM), queued in the frame before the draws that follow
 		C3D_TexFlush(&t->tex);
 		beginFrame();
+		if (st.gxEntries + 2 > 28) { // keep room for the final split and the screen transfer
+			endFrame();
+			beginFrame();
+		}
+		st.gxEntries += 2;
 		C3D_SyncTextureCopy((u32 *)t->tex.data, 0, (u32 *)vram.data, 0, t->tex.size, GX_TRANSFER_RAW_COPY(1));
 		st.deadTextures.push_back(t->tex); // freed once the GPU is done (the copy reads it)
 		t->tex = vram;
@@ -482,7 +496,9 @@ GPU_BLENDEQUATION toBlendEquation(GLenum e) {
 // origin like GL for texture targets; the top screen is rotated). fullTarget: the viewport covers
 // the whole framebuffer (glClear ignores the viewport). Viewport first: citro3d's
 // C3D_SetViewport also resets the scissor.
-void applyViewportScissor(bool screen, bool scissorOn, const Tex *target, bool fullTarget) {
+// Returns false when the scissor box is empty (nothing may be drawn): citro3d writes right-1 and
+// bottom-1, so an empty box at the origin would wrap to the whole target.
+bool applyViewportScissor(bool screen, bool scissorOn, const Tex *target, bool fullTarget) {
 	const GLint *v = st.viewport;
 	if (fullTarget) {
 		if (screen)
@@ -497,16 +513,18 @@ void applyViewportScissor(bool screen, bool scissorOn, const Tex *target, bool f
 	}
 	if (!scissorOn) {
 		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-		return;
+		return true;
 	}
 	// box clamped to the target (the PICA takes unsigned coordinates)
 	const GLint tw = screen ? 400 : target->pw, th = screen ? 240 : target->ph;
 	const GLint x0 = std::min(std::max(st.scissor[0], 0), tw), y0 = std::min(std::max(st.scissor[1], 0), th);
 	const GLint x1 = std::min(std::max(st.scissor[0] + st.scissor[2], x0), tw), y1 = std::min(std::max(st.scissor[1] + st.scissor[3], y0), th);
+	if (x0 >= x1 || y0 >= y1) return false;
 	if (screen)
 		C3D_SetScissor(GPU_SCISSOR_NORMAL, y0, 400 - x1, y1, 400 - x0);
 	else
 		C3D_SetScissor(GPU_SCISSOR_NORMAL, x0, y0, x1, y1);
+	return true;
 }
 
 u32 packColor(const float *c) {
@@ -975,7 +993,7 @@ void emit(const std::vector<CpuVtx> &verts, C3D_RenderTarget *target, bool scree
 			if (tex[i]) tex[i]->useSerial = st.frameSerial;
 		}
 		if (targetTex) targetTex->useSerial = st.frameSerial;
-		applyViewportScissor(screen, st.scissorTest, targetTex, clearQuad);
+		if (!applyViewportScissor(screen, st.scissorTest, targetTex, clearQuad)) return; // empty scissor box
 		C3D_BindProgram(&st.shader);
 		C3D_SetAttrInfo(&st.attrInfo);
 		C3D_BufInfo *bi = C3D_GetBufInfo();
