@@ -22,7 +22,9 @@ private copy in `build-3ds/ruby/src` with the patches below applied, the shim li
 Output (`build-3ds/ruby/`): `build/libruby-static.a`, `build/ext/extinit.a`,
 `build/ext/zlib/zlib.a`, `build/enc/{encinit,libenc,libtrans}.a`, `shim/librb3dsshim.a`;
 headers in `build/.ext/include/arm-eabi` and `src/include`. Link them in one group with
-`-lz -lctru -lm`. Ruby's stack overflow check needs the size of the stack of the thread that
+`-lz -lctru -lm`, with `ext/extinit.a` before `libruby-static.a`. Both define `Init_ext` (libruby's
+`dmyext.o` is an empty one), and the first archive in the group wins. With the empty one,
+statically linked extensions such as zlib cannot be required. Ruby's stack overflow check needs the size of the stack of the thread that
 calls `RUBY_INIT_STACK`: with main()'s stack, give it a large stack
 (`u32 __stacksize__ = 1024 * 1024;`); with a thread you create (mkxp-z's "rgss" thread), set
 `rb3ds_main_stack_size` from `3ds/ruby/shim/include/rb3ds.h` to that thread's stack size first.
