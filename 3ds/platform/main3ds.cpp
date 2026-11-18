@@ -113,6 +113,11 @@ int main(int argc, char *argv[]) {
 		} catch (const Exception &exc) {
 			error = exc.msg;
 		}
+		// rmxp3ds D15: render the game screen at 3DS height. mkxp-z's Hires mode scales the screen
+		// buffers by framebufferScalingFactor (bitmaps keep their size, hook in bitmap.cpp); the
+		// default factor fits RGSS1's 640x480 into 240 lines, mkxp.json can set another one.
+		conf->enableHires = true;
+		if (conf->framebufferScalingFactor == 1.0) conf->framebufferScalingFactor = 240.0 / 480.0;
 		EventThread *eventThread = nullptr;
 		RGSSThreadData *rtData = nullptr;
 		if (error.empty()) {

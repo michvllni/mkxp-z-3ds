@@ -26,12 +26,34 @@ involved.
   TEX/FBO, buffers, Quad, ShaderSet, GLState).
 - **The GL function table** (`gl`, `src/display/gl/gl-fun.h`) is the only way the display code
   reaches the GPU. On the 3DS it is `display/gl3ds.cpp`, an implementation of that GL ES 2 subset
-  for the PICA200 (rmxp3ds `docs/DECISIONS.md` D14). **Current state:** bookkeeping only. Object
-  names, compile and link status and uniform locations work, but nothing is drawn, and
-  `ReadPixels` returns transparent black. The citro3d implementation comes next. It must:
-  - store textures larger than the PICA200's 1024 px as several pieces (the table reports 4096,
-    so mkxp-z's tileset atlas fits real tilesets);
-  - honour `GL_UNPACK_ROW_LENGTH`/`SKIP_*` in `TexSubImage2D` (`gl.unpack_subimage` is set).
+  for the PICA200 on citro3d (rmxp3ds `docs/DECISIONS.md` D14). Design (see the top of
+  `gl3ds.cpp`):
+  - **Textures:** RGBA8, padded to powers of two, swizzled on the CPU. They move to VRAM the first
+    time they are rendered into, because PICA render targets must be in VRAM.
+  - **Framebuffer 0** is the top screen. mkxp-z sees a 400×240 window; the physical framebuffer is
+    rotated.
+  - **Vertex programs** run on the CPU, followed by one pass-through PICA shader
+    (`display/passthrough.v.pica`).
+  - **Fragment programs:** recognised by their embedded source and mapped to TEV presets.
+  - **`glClear`** draws a quad over the whole target, so the scissor applies.
+  - **`ReadPixels`** waits for the GPU and detiles.
+
+  **Works:**
+  - textures, render targets, clear/`fill_rect`, `blt` (approximated), `draw_text`, `get_pixel`;
+  - sprites (opacity, color, tone without gray), plain textures, flat and vertex colors;
+  - presenting to the top screen.
+
+  **Missing:**
+  - Textures over 1024 px (stored as pieces later; the table reports 4096 so mkxp-z's tileset
+    atlas fits real tilesets).
+  - The gray tone, bush, pattern and invert of sprites.
+  - Plane and transitions.
+  - Tilemaps.
+  - Hue, blur and the remaining programs (drawn as plain texture, logged once).
+- **Screen resolution (rmxp3ds D15):** the game screen is rendered at 3DS height, pillarboxed.
+  mkxp-z's Hires mode scales its screen buffers by `framebufferScalingFactor`. `main3ds.cpp`
+  always enables it, with the default factor 240/480 = 0.5 for RGSS1's 640×480; `mkxp.json` can
+  set another factor (e.g. 0.625 for 512×384). Bitmaps keep their size (hook in `bitmap.cpp`).
 - **3DS replacements** for desktop-only files:
 
 | Upstream | 3DS | |
@@ -50,6 +72,8 @@ involved.
   - `src/display/graphics.cpp`: movie playback (Theora + OpenAL) is left out;
     `Graphics.play_movie` logs and returns, as if the movie had ended.
   - `src/input/input.cpp`: `Input::Controller.name` returns "Nintendo 3DS".
+  - `src/display/graphics.cpp`: frames end in `gl3dsPresent()` instead of `SDL_GL_SwapWindow`.
+  - `src/display/bitmap.cpp`: no high-res bitmap twins in Hires mode (`MKXPZ_HIRES_BITMAPS`).
   - `binding/binding-mri.cpp` `showExc`: the uncaught-error text also goes to `rgssErrorMsg`.
 - **MIDI:** fluidsynth is loaded at run time as on desktop. That fails on the 3DS, so MIDI is
   disabled.
@@ -88,7 +112,6 @@ involved.
   instead.
 
 ## Known limitations (this stage)
-- **No picture yet:** the GL function table does not draw. Bitmap pixel reads (`get_pixel`) return
-  0.
+- **Renderer:** see the "Missing" list above.
 - No sound, no movies (skipped), no HTTP.
 - RGSS2/3 classes are compiled but out of scope (rmxp3ds D4).

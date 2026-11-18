@@ -23,6 +23,8 @@
 
 #ifndef __3DS__ // mkxp-z-3ds: no OpenAL/Theora movie playback on the 3DS
 #include "alstream.h"
+#else
+#include "gl3ds.h"
 #endif
 #include "audio.h"
 #include "binding.h"
@@ -1049,7 +1051,11 @@ private:
             };
             FBO::clear();
             metaBlitBufferFlippedScaled(args...);
+#ifdef __3DS__ // mkxp-z-3ds: the top screen instead of an SDL window
+            gl3dsPresent();
+#else
             SDL_GL_SwapWindow(threadData->window);
+#endif
             mkxp_angle_direct3d_resize_callback = nullptr;
         }
 
@@ -1779,7 +1785,11 @@ void Graphics::repaintWait(const AtomicFlag &exitCond, bool checkReset) {
         
         FBO::clear();
         p->metaBlitBufferFlippedScaled(scaleIsSpecial);
+#ifdef __3DS__ // mkxp-z-3ds: the top screen instead of an SDL window
+        gl3dsPresent();
+#else
         SDL_GL_SwapWindow(p->threadData->window);
+#endif
         p->fpsLimiter.delay();
         
         p->threadData->ethread->notifyFrame();

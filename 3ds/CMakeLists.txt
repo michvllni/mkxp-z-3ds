@@ -57,6 +57,14 @@ foreach(f ${SHADER_FILES} "${MKXP_ROOT}/assets/liberation.ttf")
     DEPENDS "${f}" "${MKXP_ROOT}/subprojects/common/embedtool.py" VERBATIM)
   list(APPEND EMBEDDED "${GEN_DIR}/${name}.xxd")
 endforeach()
+# The pass-through PICA vertex shader of gl3ds (picasso), embedded the same way.
+add_custom_command(OUTPUT "${GEN_DIR}/passthrough.shbin"
+  COMMAND "${CTR_PICASSO_EXE}" -o "${GEN_DIR}/passthrough.shbin" "${CMAKE_CURRENT_SOURCE_DIR}/display/passthrough.v.pica"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/display/passthrough.v.pica" VERBATIM)
+add_custom_command(OUTPUT "${GEN_DIR}/passthrough.shbin.xxd"
+  COMMAND "${Python3_EXECUTABLE}" "${MKXP_ROOT}/subprojects/common/embedtool.py" "${GEN_DIR}/passthrough.shbin" "${GEN_DIR}/passthrough.shbin.xxd" mkxp_shader_passthrough_shbin
+  DEPENDS "${GEN_DIR}/passthrough.shbin" VERBATIM)
+list(APPEND EMBEDDED "${GEN_DIR}/passthrough.shbin.xxd")
 add_custom_target(mkxp_embedded DEPENDS ${EMBEDDED})
 
 # Upstream sources used unchanged (or with small __3DS__ hooks).
@@ -102,7 +110,7 @@ target_include_directories(mkxp-z PRIVATE
   "${MKXP_ROOT}/src/display/libnsgif/utils" "${MKXP_ROOT}/src/etc" "${MKXP_ROOT}/src/filesystem"
   "${MKXP_ROOT}/src/input" "${MKXP_ROOT}/src/net" "${MKXP_ROOT}/src/system" "${MKXP_ROOT}/src/util"
   "${MKXP_ROOT}/src/util/sigslot" "${MKXP_ROOT}/src/util/sigslot/adapter" "${MKXP_ROOT}/binding"
-  "${CMAKE_CURRENT_SOURCE_DIR}/ruby/shim/include")
+  "${CMAKE_CURRENT_SOURCE_DIR}/ruby/shim/include" "${CMAKE_CURRENT_SOURCE_DIR}/display")
 target_include_directories(mkxp-z SYSTEM PRIVATE
   "${DEPS3DS_DIR}/include/SDL2" "${DEPS3DS_DIR}/include/uchardet" "${DEPS3DS_DIR}/include/pixman-1"
   ${FREETYPE_INCLUDE_DIRS} ${PHYSFS_INCLUDE_DIRS}
@@ -119,7 +127,7 @@ target_link_libraries(mkxp-z PRIVATE
   "${RUBY3DS_DIR}/shim/librb3dsshim.a"
   "${DEPS3DS_DIR}/lib/libSDL2_ttf.a" "${DEPS3DS_DIR}/lib/libSDL2_image.a" "${DEPS3DS_DIR}/lib/libSDL2.a"
   "${DEPS3DS_DIR}/lib/libuchardet.a" "${DEPS3DS_DIR}/lib/libpixman-1.a"
-  ${PHYSFS_STATIC_LDFLAGS} png16 jpeg ${FREETYPE_STATIC_LDFLAGS} iconv z m
+  ${PHYSFS_STATIC_LDFLAGS} png16 jpeg ${FREETYPE_STATIC_LDFLAGS} iconv z m citro3d
   -Wl,--end-group)
 
 ctr_generate_smdh(mkxp-z.smdh

@@ -29,6 +29,14 @@
 
 #include <pixman.h>
 
+#ifdef __3DS__
+// mkxp-z-3ds: Hires mode only sets the screen resolution (rmxp3ds D15: the game screen is
+// rendered at 3DS height); bitmaps get no high-res twins.
+#define MKXPZ_HIRES_BITMAPS false
+#else
+#define MKXPZ_HIRES_BITMAPS shState->config().enableHires
+#endif
+
 #include "gl-util.h"
 #include "gl-meta.h"
 #include "quad.h"
@@ -567,7 +575,7 @@ Bitmap::Bitmap(const char *filename)
     std::string filenameStd = filename;
     Bitmap *hiresBitmap = nullptr;
     // TODO: once C++20 is required, switch to filenameStd.starts_with(hiresPrefix)
-    if (shState->config().enableHires && filenameStd.compare(0, hiresPrefix.size(), hiresPrefix) != 0) {
+    if (MKXPZ_HIRES_BITMAPS && filenameStd.compare(0, hiresPrefix.size(), hiresPrefix) != 0) {
         // Look for a high-res version of the file.
         std::string hiresFilename = hiresPrefix + filenameStd;
         try {
@@ -720,7 +728,7 @@ Bitmap::Bitmap(int width, int height, bool isHires)
     
     Bitmap *hiresBitmap = nullptr;
 
-    if (shState->config().enableHires && !isHires) {
+    if (MKXPZ_HIRES_BITMAPS && !isHires) {
         // Create a high-res version as well.
         double scalingFactor = shState->config().textureScalingFactor;
         int hiresWidth = (int)lround(scalingFactor * width);
