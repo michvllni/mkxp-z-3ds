@@ -22,6 +22,14 @@ It supports Windows, Linux (x86, ARM, and POWER), and both Intel and Apple Silic
 
 mkxp-z is licensed under the GNU General Public License v2+. However, if you build mkxp-z with the `openssl` option turned on (which is the default), you will also need to comply with OpenSSL's Apache v2 license, which in practice means that the resulting binaries are licensed under GPLv3.
 
+## mkxp-z-3ds: Nintendo 3DS port
+This fork (mkxp-z-3ds) is the runtime of [rmxp3ds](https://github.com/michvllni/rmxp3ds), which
+runs RPG Maker XP games on the New Nintendo 3DS. The 3DS parts live in `3ds/`:
+- `3ds/ruby/`: CRuby 3.1.3 cross-build.
+- `3ds/deps/`: SDL2 utility libraries.
+
+Plan, status and tests are in rmxp3ds; see `AGENTS.md` here. Everything else is upstream mkxp-z.
+
 ## Bindings
 Bindings provide the glue code for an interpreted language environment to run game scripts in. mkxp-z focuses on MRI and as such the mruby and null bindings are not included.
 

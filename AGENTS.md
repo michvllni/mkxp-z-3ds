@@ -13,14 +13,17 @@ what is specific to this repository.
 - 3DS port: `3ds/`
   - `3ds/ruby/`: CRuby cross-build (`build.sh`), Ruby patches (`patches/`), POSIX shim
     (`shim/`). See `3ds/ruby/README.md`.
+  - `3ds/deps/`: SDL2, SDL2_image, SDL2_ttf as static utility libraries for the 3DS
+    (`build.sh`, pinned release archives). See `3ds/deps/README.md`.
   - Later milestones add the platform layer and the citro3d renderer here (rmxp3ds PLAN §3.1).
 
 ## Build / test
 | What | Command |
 |---|---|
 | CRuby for 3DS | `3ds/ruby/build.sh --jobs N` → `build-3ds/ruby/` (needs `DEVKITPRO`, meson, host Ruby 3.1.3) |
+| SDL2 libraries for 3DS | `3ds/deps/build.sh --jobs N` → `build-3ds/deps/prefix/` (needs `DEVKITPRO`, cmake, ninja; downloads from GitHub) |
 | Desktop build (upstream reference, golden images) | see upstream `README.md` / `.github/workflows/autobuild.yml` |
-| 3DS tests | run from rmxp3ds: `tools/bench` + `tests/smoke/azahar-smoke.sh` (headless Azahar) |
+| 3DS tests | run from rmxp3ds: `tools/bench`, `tools/sdlcheck` + `tests/smoke/azahar-smoke.sh` (headless Azahar) |
 
 The toolchain comes from the rmxp3ds dev container (or its `tools/setup-workspace.sh`).
 
