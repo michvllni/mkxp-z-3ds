@@ -1,0 +1,26 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+gc.c: without sigaction there are no read-barrier signal handlers. Compaction is unavailable
+anyway without mmap (USE_MMAP_ALIGNED_ALLOC == 0 makes GC.compact raise NotImplementedError),
+so install/uninstall_handlers become no-ops.
+
+--- a/gc.c
++++ b/gc.c
+@@ -5043,6 +5043,18 @@
+      * to si_addr from sigaction */
+     old_handler = SetUnhandledExceptionFilter(read_barrier_signal);
+ }
++#elif !defined(POSIX_SIGNAL)
++/* No sigaction (newlib on the Nintendo 3DS): compaction is unavailable there anyway
++ * (no mmap, see USE_MMAP_ALIGNED_ALLOC), so the read barrier handlers are never needed. */
++static void
++uninstall_handlers(void)
++{
++}
++
++static void
++install_handlers(void)
++{
++}
+ #else
+ static struct sigaction old_sigbus_handler;
+ static struct sigaction old_sigsegv_handler;

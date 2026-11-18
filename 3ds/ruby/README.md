@@ -1,0 +1,59 @@
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+# CRuby for the Nintendo 3DS
+
+Cross-compiles the Ruby that mkxp-z embeds (`subprojects/ruby-3.1.wrap`: Ruby 3.1.3 plus
+mkxp-z's patches) as a static library for the New Nintendo 3DS (devkitARM + libctru, ARM11
+MPCore, hard float). Part of the rmxp3ds project (https://github.com/michvllni/rmxp3ds), which
+builds its test and benchmark apps against this output.
+
+## Build
+Needs devkitARM/libctru (`DEVKITPRO`), meson, and a host Ruby of exactly the same version as
+baseruby on `PATH`. The rmxp3ds dev container provides all of them.
+
+```sh
+3ds/ruby/build.sh --jobs 4          # output in build-3ds/ruby/
+3ds/ruby/build.sh --help
+```
+
+Steps: `meson subprojects download ruby-3.1` (same source and patches as the desktop build), a
+private copy in `build-3ds/ruby/src` with the patches below applied, the shim library, configure
+(re-run when its arguments change), make, and an ABI check of the coroutine object.
+
+Output (`build-3ds/ruby/`): `build/libruby-static.a`, `build/ext/extinit.a`,
+`build/ext/zlib/zlib.a`, `build/enc/{encinit,libenc,libtrans}.a`, `shim/librb3dsshim.a`;
+headers in `build/.ext/include/arm-eabi` and `src/include`. Link them in one group with
+`-lz -lctru -lm`, and give the main thread a large stack (`u32 __stacksize__ = 1024 * 1024;`).
+
+## Configuration
+- `--with-coroutine=arm32`, `--disable-dln --with-static-linked-ext`, extensions: zlib only
+  (RGSS1 needs Marshal, which is core, and Zlib).
+- `-std=gnu17` (Ruby 3.1 predates C23), `-D_GNU_SOURCE` (newlib declares e.g. `memrchr` only
+  then), `TRANSIENT_HEAP_TOTAL_SIZE` 4 MiB instead of 32 MiB.
+- `ac_cv_*` overrides for what newlib declares but the 3DS lacks (fork, mmap, sigaction,
+  dlopen, ...); `rb_cv_binary_elf=no` (no addr2line/dladdr).
+
+## Patches (`patches/`, applied in order)
+| Patch | Why |
+|---|---|
+| 0001 thread_pthread | `signal()` instead of `posix_signal()`; main-thread stack size from libctru's `__stacksize__` (otherwise no stack overflow detection) |
+| 0002 gc | no read-barrier signal handlers without sigaction (compaction is unavailable anyway) |
+| 0003 file | `sdmc:/`, `romfs:/` are absolute paths |
+| 0004 coroutine/arm32 | save d8–d15 in Fiber switches (hard-float AAPCS) |
+
+## Shim (`shim/`)
+POSIX pieces newlib/libctru lack: `<sys/mman.h>` with anonymous `mmap` on `memalign` (Fiber
+stacks), `waitpid`, `get*id`, `getrusage` (from the system tick), no-op `pthread_kill`,
+`umask`, `setmode`; `pipe`, `popen`, `exec*`, `chown` fail with `ENOSYS`.
+`rb3ds_compat.h` is force-included into Ruby's core objects (not into configure tests) and
+removes the close-on-exec macros: libctru's `fcntl` only handles sockets, and Ruby would call
+`rb_bug` on the first `File.open`.
+
+## Known limitations
+- **Threads:** `Thread.new { }.value` hangs. The timer thread's pipe cannot be created
+  ("scheduling broken" warning) and thread hand-off does not work yet. Single-threaded Ruby
+  (what mkxp-z runs) works.
+- **Deep C recursion:** C paths that bypass Ruby's explicit stack check (e.g. very deep nested
+  `inspect`, ~2000 levels with a 1 MiB stack) overflow the stack instead of raising
+  SystemStackError. Linux catches these with a guard page and SIGSEGV; the 3DS needs an
+  equivalent (memory permissions + libctru exception handler).
+- `GC.compact` raises NotImplementedError.

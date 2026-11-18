@@ -1,0 +1,36 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+thread_pthread.c for newlib without sigaction (Nintendo 3DS):
+- posix_signal() only exists with POSIX_SIGNAL; fall back to signal().
+- Main-thread stack size: no getrlimit/pthread_getattr_np, so take libctru's __stacksize__
+  (the app may override the weak symbol) minus a 64 KiB margin. Without it stack_maxsize
+  stays 0 and machine-stack overflow checks never fire.
+
+--- a/thread_pthread.c
++++ b/thread_pthread.c
+@@ -659,7 +659,11 @@
+     ruby_thread_set_native(th);
+     fill_thread_id_str(th);
+     native_thread_init(th);
++#ifdef POSIX_SIGNAL
+     posix_signal(SIGVTALRM, null_func);
++#else
++    signal(SIGVTALRM, null_func); /* newlib without sigaction (Nintendo 3DS) */
++#endif
+ }
+ 
+ #ifdef RB_THREAD_T_HAS_NATIVE_ID
+@@ -961,6 +965,14 @@
+ 	    space = (size_t)addr - ((size_t)((char *)addr - size) / pagesize + 1) * pagesize;
+ 	}
+ 	native_main_thread.stack_maxsize = space;
++#elif defined(__3DS__)
++	/* Nintendo 3DS (libctru): main() runs on a stack of __stacksize__ bytes, a weak symbol
++	 * the application may override. stack_start (set above from RUBY_INIT_STACK) lies close
++	 * to its top; keep a margin for the frames above it and for C code beyond Ruby's checks. */
++	extern uint32_t __stacksize__;
++	size_t size = (size_t)__stacksize__;
++	const size_t margin = 64 * 1024;
++	native_main_thread.stack_maxsize = size > 2 * margin ? size - margin : size / 2;
+ #endif
+     }
+ 
