@@ -162,6 +162,7 @@ struct State {
 	DVLB_s *dvlb = nullptr;
 	C3D_AttrInfo attrInfo;
 	Vtx *ring = nullptr;
+	C3D_Tex dummyTex; // bound to unused texture units 1 and 2 (C3D_TexBind rejects NULL there)
 	size_t ringUsed = 0; // in vertices
 
 	GLuint nextName = 1;
@@ -240,6 +241,9 @@ void initC3D() {
 	AttrInfo_AddLoader(&st.attrInfo, 4, GPU_FLOAT, 2);
 	st.ring = (Vtx *)linearAlloc(VERTEX_RING_BYTES);
 	if (!st.ring) throw Exception(Exception::MKXPError, "gl3ds: out of linear memory for the vertex buffer");
+	if (!C3D_TexInit(&st.dummyTex, 8, 8, GPU_RGBA8)) throw Exception(Exception::MKXPError, "gl3ds: out of linear memory");
+	memset(st.dummyTex.data, 0, st.dummyTex.size);
+	C3D_TexFlush(&st.dummyTex);
 	st.c3dReady = true;
 }
 
@@ -919,9 +923,13 @@ bool splitBush(const Program *prog, const std::vector<CpuVtx> &in, std::vector<C
 	return true;
 }
 
+// Binds t to a PICA texture unit, or unbinds the unit. citro3d 1.7.1 C3D_TexBind accepts NULL only
+// for unit 0 (texture.c: C3D_TexGetType(tex) for units 1 and 2 dereferences it; a data abort on the
+// console, Azahar reads 0): units 1 and 2 get a dummy texture no TEV preset samples. Either way
+// citro3d keeps no pointer to a texture that may be deleted.
 void bindSampled(int unit, Tex *t) {
 	if (!t) {
-		C3D_TexBind(unit, nullptr);
+		C3D_TexBind(unit, unit == 0 ? nullptr : &st.dummyTex);
 		return;
 	}
 	C3D_TexSetFilter(&t->tex, t->linear ? GPU_LINEAR : GPU_NEAREST, t->linear ? GPU_LINEAR : GPU_NEAREST);
