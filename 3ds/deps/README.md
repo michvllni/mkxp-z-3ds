@@ -1,32 +1,38 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
-# SDL2 utility libraries for the Nintendo 3DS
+# Libraries for the 3DS build of mkxp-z
 
-mkxp-z uses SDL2 for much more than windowing. Bitmaps are `SDL_Surface`s, images are loaded with
+`build.sh` builds the libraries the 3DS runtime needs that devkitPro's portlibs do not provide:
+SDL2, SDL2_image and SDL2_ttf as utility libraries, uchardet (text encoding detection, used for
+`Game.ini` and the config) and pixman (region tracking in Bitmap). mkxp-z uses SDL2 for much more
+than windowing. Bitmaps are `SDL_Surface`s, images are loaded with
 SDL2_image, text is rendered with SDL2_ttf, and files go through `SDL_RWops`. On the 3DS the
 runtime keeps these uses and builds the libraries without video, render, audio and joystick.
 Drawing goes through citro3d, input through libctru (rmxp3ds PLAN §3.1). Part of the rmxp3ds
 project (https://github.com/michvllni/rmxp3ds).
 
 ## Build
-Needs devkitARM/libctru (`DEVKITPRO`), cmake and ninja. The rmxp3ds dev container provides them.
+Needs devkitARM/libctru (`DEVKITPRO`), cmake, meson and ninja. The rmxp3ds dev container provides
+them.
 
 ```sh
 3ds/deps/build.sh --jobs 4          # output in build-3ds/deps/prefix/
 3ds/deps/build.sh --help
 ```
 
-Each library is downloaded once, checked against its SHA-256, configured with devkitPro's
-`cmake/3DS.cmake` and installed into `build-3ds/deps/prefix` (`include/SDL2`, `lib/*.a`, CMake and
-pkg-config files). A library is rebuilt when its version, `build.sh`, the compiler or newlib, the
-CMake toolchain file, libctru or the portlibs archives it links (libpng, libjpeg, FreeType, zlib,
-bzip2) change, or when it is missing from the prefix. A
-rebuilt SDL2 clears the prefix and rebuilds the other two.
+Each library is downloaded once and checked against its SHA-256. It is configured with devkitPro's
+`cmake/3DS.cmake` (pixman: devkitPro's meson cross file) and installed into `build-3ds/deps/prefix`
+(`include/`, `lib/*.a`, CMake and pkg-config files). A library is rebuilt when any of these
+change: its version, `build.sh`, the compiler or newlib, the CMake toolchain file, libctru, or the
+portlibs archives it links (libpng, libjpeg, FreeType, zlib, bzip2). It is also rebuilt when it is
+missing from the prefix. A rebuilt SDL2 clears the prefix and rebuilds all the others.
 
 | Library | Version | Configuration | License |
 |---|---|---|---|
 | [SDL2](https://github.com/libsdl-org/SDL) | 2.32.10 | static; video, render, audio, joystick, haptic, sensor, hidapi off; threads, timers, RWops, surfaces and blits on | zlib |
 | [SDL2_image](https://github.com/libsdl-org/SDL_image) | 2.8.12 | PNG via libpng 1.6.53 and JPEG via libjpeg-turbo from devkitPro's 3DS portlibs (not stb_image, which needs about compressed + 2× raw size at peak, double libpng's), plus BMP, GIF, TGA and other formats without dependencies; no AVIF, JXL, TIFF, WebP | zlib; contains nanosvg (zlib) and qoi (MIT); PNG/JPEG saving goes through libpng/libjpeg |
 | [SDL2_ttf](https://github.com/libsdl-org/SDL_ttf) | 2.24.0 | FreeType 2.14.1 from devkitPro's 3DS portlibs, no HarfBuzz | zlib |
+| [uchardet](https://www.freedesktop.org/wiki/Software/uchardet/) | 0.0.8 | static, no CLI; same archive and checksum as mkxp-z's `subprojects/uchardet.wrap` | MPL-1.1 / GPL-2.0-or-later / LGPL-2.1-or-later |
+| [pixman](https://www.pixman.org/) | 0.46.4 | meson; ARMv6 SIMD on; no PIC; tests, demos and libpng off; same archive and checksum as mkxp-z's `subprojects/pixman.wrap` | MIT |
 
 Portlibs linked from devkitPro: FreeType (FTL or GPLv2; under the FTL, binary releases must
 credit the FreeType Project), libpng (libpng license), libjpeg-turbo (IJG/BSD), bzip2 (BSD-like),

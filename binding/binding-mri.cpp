@@ -426,6 +426,8 @@ RB_METHOD(mkxpPlatform) {
                 break;
         }
     }
+#elif MKXPZ_PLATFORM == MKXPZ_PLATFORM_3DS // mkxp-z-3ds
+    std::string platform("Nintendo 3DS");
 #else
     std::string platform("Linux");
 #endif
