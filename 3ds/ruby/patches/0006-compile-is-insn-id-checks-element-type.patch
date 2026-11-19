@@ -1,0 +1,50 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+compile.c: check that an element is an instruction before reading its instruction id.
+get_next_insn(), get_prev_insn() and get_destination_insn() can return ADJUST elements, and the
+element after a `dup` can be a LABEL. devkitARM uses short enums, so INSN.insn_id is one byte at
+offset 12: on an ADJUST it is the low byte of its label pointer, on a LABEL the low byte of
+label_no. When the ADJUST byte is BIN(jump) (60) or BIN(checktype) (44), optimize_checktype()
+follows a bogus operand and crashes (NULL INSN) while large scripts compile. Whether it happens
+depends on heap addresses (rmxp3ds NOTES.md, M4 findings; the same failure was analysed in a
+PS Vita Ruby port by Asukate). Fixed: IS_INSN_ID, the raw insn_id compare in branch jump
+threading, and an early return in optimize_checktype() for non-INSN elements. With 4-byte enums
+a non-NULL pointer never equals an instruction id, so desktop builds are unaffected (a NULL-label
+ADJUST reads 0 = nop there too; that check is guarded).
+
+--- a/compile.c
++++ b/compile.c
+@@ -347,7 +347,12 @@
+ #define IS_LABEL(link) ((link)->type == ISEQ_ELEMENT_LABEL)
+ #define IS_ADJUST(link) ((link)->type == ISEQ_ELEMENT_ADJUST)
+ #define IS_TRACE(link) ((link)->type == ISEQ_ELEMENT_TRACE)
+-#define IS_INSN_ID(iobj, insn) (INSN_OF(iobj) == BIN(insn))
++/* rmxp3ds (Nintendo 3DS): check the element type before the instruction id. get_next_insn() and
++ * get_destination_insn() may return an ADJUST element; with devkitARM's short enums insn_id is
++ * one byte, and INSN_OF() then reads the low byte of the ADJUST's label pointer, which equals
++ * BIN(jump) for some heap addresses (random crashes while compiling large scripts). */
++#define IS_INSN_ID(iobj, insn) \
++    (IS_INSN((const LINK_ELEMENT *)(iobj)) && INSN_OF(iobj) == BIN(insn))
+ #define IS_NEXT_INSN_ID(link, insn) \
+     ((link)->next && IS_INSN((link)->next) && IS_INSN_ID((link)->next, insn))
+ 
+@@ -2822,6 +2827,10 @@
+     LABEL *dest = 0;
+     VALUE type;
+ 
++    /* rmxp3ds: iseq_peephole_optimize() may be called on an ADJUST element (from
++     * get_next_insn()); its one-byte insn_id would be part of a label pointer. */
++    if (!IS_INSN(&iobj->link)) return FALSE;
++
+     switch (INSN_OF(iobj)) {
+       case BIN(putstring):
+ 	type = INT2FIX(T_STRING);
+@@ -3123,7 +3132,8 @@
+                 else if (prev_dup && IS_INSN_ID(nobj, dup) &&
+                          !!(nobj = (INSN *)nobj->link.next) &&
+                          /* basic blocks, with no labels in the middle */
+-                         nobj->insn_id == iobj->insn_id) {
++                         /* rmxp3ds: check the type before the one-byte insn_id (see IS_INSN_ID) */
++                         IS_INSN(&nobj->link) && nobj->insn_id == iobj->insn_id) {
+                     /*
+                      *   dup
+                      *   if L1
