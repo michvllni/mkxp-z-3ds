@@ -65,12 +65,19 @@ struct Source
 	int pitch = 0;
 	std::vector<uint8_t> own;
 	int width = 0, height = 0;
+	/* mega bitmaps read in place: their disposal clears 'data' (tiles not yet in the atlas
+	 * then draw blank instead of reading freed memory) */
+	sigslot::connection disposedCon;
 };
 
 /* Copies a w x h block at (sx, sy) of an RGBA8 image into a TILE x TILE tile at (dx, dy). */
 void blitTile(const Source &s, uint8_t *dst, int dx, int dy, int sx, int sy, int w, int h)
 {
 	for (int y = 0; y < h; ++y) {
+		if (!s.data) {
+			memset(dst + ((dy + y) * TILE + dx) * 4, 0, (size_t)w * 4);
+			continue;
+		}
 		uint8_t *d = dst + ((dy + y) * TILE + dx) * 4;
 		int yy = sy + y;
 		for (int x = 0; x < w; ++x) {
@@ -153,6 +160,27 @@ struct TileRendererPrivate
 			return -1;
 		if (s.slots[index] >= 0)
 			return s.slots[index];
+		if (s.autotile) {
+			/* all frames of this sub-tile at once: an animated tile then never uploads into a
+			 * page again while it cycles */
+			int per = s.single ? 1 : AUTOTILE_IDS;
+			int k = index % per, slot = -1;
+			for (int f = 0; f < s.frames; ++f) {
+				int at = f * per + k;
+				if (s.slots[at] < 0)
+					s.slots[at] = composeTile(s, at);
+				if (at == index)
+					slot = s.slots[at];
+			}
+			return slot;
+		}
+		s.slots[index] = composeTile(s, index);
+		return s.slots[index];
+	}
+
+	/* Composes tile 'index' of a source into a new atlas slot. */
+	int composeTile(const Source &s, int index)
+	{
 		std::vector<uint8_t> tile(TILE * TILE * 4);
 		if (!s.autotile) {
 			blitTile(s, tile.data(), 0, 0, (index % 8) * TILE, (index / 8) * TILE, TILE, TILE);
@@ -172,7 +200,6 @@ struct TileRendererPrivate
 		}
 		int slot = allocSlot();
 		upload(slot, tile.data());
-		s.slots[index] = slot;
 		return slot;
 	}
 };
@@ -278,6 +305,8 @@ TileRendererPrivate::TileRendererPrivate(Viewport *vp) : viewport(vp)
 
 TileRendererPrivate::~TileRendererPrivate()
 {
+	for (Source &s : sources)
+		s.disposedCon.disconnect();
 	delete reflect;
 	delete ground;
 	for (TileLayer *l : rowLayers)
@@ -347,7 +376,8 @@ int TileRenderer::addSource(Bitmap *bitmap, SourceKind kind, double frameSeconds
 	s.frameSeconds = frameSeconds;
 	s.width = bitmap->width();
 	s.height = bitmap->height();
-	if (bitmap->isMega() && bitmap->megaSurface()) {
+	bool inPlace = bitmap->isMega() && bitmap->megaSurface();
+	if (inPlace) {
 		SDL_Surface *surf = bitmap->megaSurface();
 		s.data = static_cast<const uint8_t *>(surf->pixels);
 		s.pitch = surf->pitch;
@@ -366,7 +396,7 @@ int TileRenderer::addSource(Bitmap *bitmap, SourceKind kind, double frameSeconds
 
 	if (!s.autotile) {
 		/* tileset: 8 tiles per row (columns beyond 8 are never addressed) */
-		s.slots.assign((size_t)(s.height / TILE) * 8, -1);
+		s.slots.assign((size_t)((s.height + TILE - 1) / TILE) * 8, -1); /* partial last row too */
 	} else if (s.height == TILE) {
 		s.single = true;
 		s.frames = std::max(s.width / TILE, 1);
@@ -377,13 +407,22 @@ int TileRenderer::addSource(Bitmap *bitmap, SourceKind kind, double frameSeconds
 		s.slots.assign((size_t)s.frames * AUTOTILE_IDS, -1);
 	}
 
-	for (size_t i = 0; i < p->sources.size(); ++i)
-		if (!p->sources[i].used) {
-			p->sources[i] = std::move(s);
-			return (int)i;
-		}
-	p->sources.push_back(std::move(s));
-	return (int)p->sources.size() - 1;
+	int handle = -1;
+	for (size_t i = 0; i < p->sources.size() && handle < 0; ++i)
+		if (!p->sources[i].used)
+			handle = (int)i;
+	if (handle < 0) {
+		handle = (int)p->sources.size();
+		p->sources.emplace_back();
+	}
+	p->sources[handle] = std::move(s);
+	if (inPlace) {
+		TileRendererPrivate *priv = p;
+		p->sources[handle].disposedCon = bitmap->wasDisposed.connect([priv, handle] {
+			priv->sources[handle].data = nullptr;
+		});
+	}
+	return handle;
 }
 
 void TileRenderer::removeSource(int handle)
@@ -392,6 +431,7 @@ void TileRenderer::removeSource(int handle)
 	if (handle < 0 || handle >= (int)p->sources.size() || !p->sources[handle].used)
 		return;
 	Source &s = p->sources[handle];
+	s.disposedCon.disconnect();
 	for (int slot : s.slots)
 		if (slot >= 0)
 			p->freeSlots.push_back(slot);
@@ -400,6 +440,8 @@ void TileRenderer::removeSource(int handle)
 
 int TileRenderer::frameCount(int handle) const
 {
+	if (!p)
+		return 0; /* disposed */
 	if (handle < 0 || handle >= (int)p->sources.size() || !p->sources[handle].used)
 		return 0;
 	return p->sources[handle].frames;

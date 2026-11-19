@@ -60,7 +60,8 @@ RB_METHOD(tileRendererInitialize) {
 	return self;
 }
 
-RB_METHOD(tileRendererAddSource) {
+// Guarded: C++ Exceptions (disposed renderer or bitmap, out of memory) become Ruby errors.
+RB_METHOD_GUARD(tileRendererAddSource) {
 	VALUE bitmapObj;
 	int kind;
 	double seconds;
@@ -71,34 +72,61 @@ RB_METHOD(tileRendererAddSource) {
 	GFX_GUARD_EXC(handle = r->addSource(b, kind == 1 ? TileRenderer::Autotile : TileRenderer::Tileset, seconds););
 	return INT2NUM(handle);
 }
+RB_METHOD_GUARD_END
 
-RB_METHOD(tileRendererRemoveSource) {
+RB_METHOD_GUARD(tileRendererRemoveSource) {
 	int handle;
 	rb_get_args(argc, argv, "i", &handle RB_ARG_END);
 	TileRenderer *r = getPrivateData<TileRenderer>(self);
 	GFX_GUARD_EXC(r->removeSource(handle););
 	return Qnil;
 }
+RB_METHOD_GUARD_END
 
-RB_METHOD(tileRendererFrameCount) {
+RB_METHOD_GUARD(tileRendererFrameCount) {
 	int handle;
 	rb_get_args(argc, argv, "i", &handle RB_ARG_END);
 	TileRenderer *r = getPrivateData<TileRenderer>(self);
 	return INT2NUM(r->frameCount(handle));
 }
+RB_METHOD_GUARD_END
 
-RB_METHOD(tileRendererUpdate) {
+/* Raises (longjmp) on a malformed map entry; called before any C++ object is built. */
+static void validateMaps(VALUE mapsObj)
+{
+	Check_Type(mapsObj, T_ARRAY);
+	for (long i = 0; i < RARRAY_LEN(mapsObj); ++i) {
+		VALUE m = rb_ary_entry(mapsObj, i);
+		Check_Type(m, T_ARRAY);
+		for (int t = 0; t < 2; ++t)
+			if (!NIL_P(rb_ary_entry(m, t)))
+				getPrivateDataCheck<Table>(rb_ary_entry(m, t), TableType);
+		for (int n = 2; n < 5; ++n)
+			if (!NIL_P(rb_ary_entry(m, n)))
+				(void)NUM2INT(rb_ary_entry(m, n));
+		for (int a = 5; a < 8; ++a) {
+			VALUE ary = rb_ary_entry(m, a);
+			if (NIL_P(ary))
+				continue;
+			Check_Type(ary, T_ARRAY);
+			for (long k = 0; k < RARRAY_LEN(ary); ++k)
+				if (!NIL_P(rb_ary_entry(ary, k)))
+					(void)NUM2INT(rb_ary_entry(ary, k));
+		}
+	}
+}
+
+RB_METHOD_GUARD(tileRendererUpdate) {
 	VALUE mapsObj, bridgeObj;
 	int px, py;
 	double seconds;
 	rb_get_args(argc, argv, "oiiof", &mapsObj, &px, &py, &bridgeObj, &seconds RB_ARG_END);
-	Check_Type(mapsObj, T_ARRAY);
 	TileRenderer *r = getPrivateData<TileRenderer>(self);
+	validateMaps(mapsObj);
 
 	std::vector<TileRenderer::MapInput> maps(RARRAY_LEN(mapsObj));
 	for (long i = 0; i < RARRAY_LEN(mapsObj); ++i) {
 		VALUE m = rb_ary_entry(mapsObj, i);
-		Check_Type(m, T_ARRAY);
 		TileRenderer::MapInput &in = maps[i];
 		in.data = tableOrNull(rb_ary_entry(m, 0));
 		in.flags = tableOrNull(rb_ary_entry(m, 1));
@@ -115,6 +143,7 @@ RB_METHOD(tileRendererUpdate) {
 	GFX_GUARD_EXC(r->update(maps, px, py, RTEST(bridgeObj), seconds););
 	return Qnil;
 }
+RB_METHOD_GUARD_END
 
 RB_METHOD(tileRendererGetViewport) {
 	RB_UNUSED_PARAM;
