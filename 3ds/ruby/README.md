@@ -13,7 +13,8 @@ baseruby on `PATH`. The rmxp3ds dev container provides all of them.
 ```sh
 3ds/ruby/build.sh --jobs 4          # output in build-3ds/ruby/
 3ds/ruby/build.sh --help
-RB3DS_EXTRA_CFLAGS="-g" 3ds/ruby/build.sh --build-dir build-3ds/ruby-dbg   # debugging build
+RB3DS_EXTRA_CFLAGS="-g" 3ds/ruby/build.sh --build-dir build-3ds/ruby-dbg   # debugging build;
+#   the runtime uses it with cmake -DRUBY3DS_DIR=$PWD/build-3ds/ruby-dbg (own build dir)
 ```
 
 Steps: `meson subprojects download ruby-3.1` (same source and patches as the desktop build), a
@@ -47,7 +48,7 @@ calls `RUBY_INIT_STACK`: with main()'s stack, give it a large stack
 | 0003 file | `sdmc:/`, `romfs:/` are absolute paths; `File.dirname` keeps the device |
 | 0004 coroutine/arm32 | save d8–d15 in Fiber switches (hard-float AAPCS) |
 | 0005 cont | fiber pool starts with 2 stacks instead of 8 (zeroed heap memory: ~0.65 instead of ~2.6 MB at boot); if allocating 2 fails there is no smaller fallback |
-| 0006 compile | `IS_INSN_ID` checks the element type first: with devkitARM's short enums `insn_id` is one byte, and on an ADJUST element `INSN_OF()` read the low byte of its label pointer, which matched `jump` for some heap addresses and crashed the peephole optimizer while large scripts compiled (depends on heap addresses; rmxp3ds engine check `compile_next_loops`) |
+| 0006 compile | `IS_INSN_ID`, branch jump threading and `optimize_checktype` check the element type first: with devkitARM's short enums `insn_id` is one byte, and on an ADJUST element `INSN_OF()` read the low byte of its label pointer, which matched `jump` for some heap addresses and crashed the peephole optimizer while large scripts compiled (depends on heap addresses; rmxp3ds engine check `compile_next_loops`) |
 
 ## Shim (`shim/`)
 POSIX pieces newlib/libctru lack: `<sys/mman.h>` with anonymous `mmap` on `memalign` (Fiber
