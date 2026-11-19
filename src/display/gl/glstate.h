@@ -48,8 +48,15 @@ struct GLProperty
 	const T &get()    { return current; }
 	void set(const T &value)
 	{
+#ifdef __3DS__
+		// mkxp-z-3ds: properties whose applied value depends on more than the value itself
+		// (the scissor box is scaled for the Hires ping-pong framebuffer) are applied again
+		if (value == current && !reapply())
+			return;
+#else
 		if (value == current)
 			return;
+#endif
 
 		init(value);
 	}
@@ -66,6 +73,9 @@ struct GLProperty
 	}
 private:
 	virtual void apply(const T &value) = 0;
+#ifdef __3DS__
+	virtual bool reapply() const { return false; }
+#endif
 
 	T current;
 	std::stack<T> stack;
@@ -85,6 +95,11 @@ public:
 
 private:
 	void apply(const IntRect &value);
+#ifdef __3DS__
+	// mkxp-z-3ds: apply() scales the box when the screen's ping-pong framebuffer is bound
+	// (Hires), so an unchanged box may still need a different GL scissor
+	bool reapply() const { return true; }
+#endif
 };
 
 class GLScissorTest : public GLProperty<bool>
