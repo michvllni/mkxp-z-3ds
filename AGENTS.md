@@ -57,6 +57,10 @@ The toolchain comes from the rmxp3ds dev container (or its `tools/setup-workspac
 runs on a thread other than main() (the runtime's "rgss" thread).
 
 ## Pitfalls
+- devkitARM uses short enums (enum fields as small as their values allow). Code that reads an
+  enum field through the wrong struct type sees one byte of something else instead of a whole
+  word: Ruby's `IS_INSN_ID` on an ADJUST element crashed the compiler that way (Ruby patch 0006).
+  Heap-address-dependent crashes that move with unrelated code changes can be this.
 - Link `ext/extinit.a` and `enc/encinit.a` before `libruby-static.a`: they define `Init_ext` and
   `Init_enc`, which libruby's `dmyext.o`/`dmyenc.o` define empty, and the first archive in the link
   group wins. With the wrong order `require 'zlib'` fails, and only the built-in encodings exist

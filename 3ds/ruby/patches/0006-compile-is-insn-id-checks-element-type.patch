@@ -1,0 +1,25 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+compile.c: IS_INSN_ID checks that the element is an instruction. get_next_insn() and
+get_destination_insn() can return an ADJUST element. devkitARM uses short enums, so INSN.insn_id
+is one byte and INSN_OF() on an ADJUST reads the low byte of its label pointer; when that byte is
+BIN(jump) (60), optimize_checktype() follows a bogus operand and crashes (NULL INSN) while large
+scripts compile. Whether it happens depends on heap addresses (rmxp3ds NOTES.md, M4 findings;
+the same failure was analysed in a PS Vita Ruby port by Asukate). With 4-byte enums the read
+covers the whole pointer, which never equals an instruction id, so desktop builds are unaffected.
+
+--- a/compile.c
++++ b/compile.c
+@@ -347,7 +347,12 @@
+ #define IS_LABEL(link) ((link)->type == ISEQ_ELEMENT_LABEL)
+ #define IS_ADJUST(link) ((link)->type == ISEQ_ELEMENT_ADJUST)
+ #define IS_TRACE(link) ((link)->type == ISEQ_ELEMENT_TRACE)
+-#define IS_INSN_ID(iobj, insn) (INSN_OF(iobj) == BIN(insn))
++/* rmxp3ds (Nintendo 3DS): check the element type before the instruction id. get_next_insn() and
++ * get_destination_insn() may return an ADJUST element; with devkitARM's short enums insn_id is
++ * one byte, and INSN_OF() then reads the low byte of the ADJUST's label pointer, which equals
++ * BIN(jump) for some heap addresses (random crashes while compiling large scripts). */
++#define IS_INSN_ID(iobj, insn) \
++    (IS_INSN((const LINK_ELEMENT *)(iobj)) && INSN_OF(iobj) == BIN(insn))
+ #define IS_NEXT_INSN_ID(link, insn) \
+     ((link)->next && IS_INSN((link)->next) && IS_INSN_ID((link)->next, insn))
+ 

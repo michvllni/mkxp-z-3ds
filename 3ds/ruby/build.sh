@@ -23,6 +23,10 @@
 #   --target TARGET   make target (default: all; e.g. libruby-static.a)
 #   -h, --help        show this help
 #
+# ENVIRONMENT
+#   RB3DS_EXTRA_CFLAGS  extra compiler flags for Ruby (e.g. -g, or -DUSE_TRANSIENT_HEAP=0 for a
+#                       debugging build in its own --build-dir); a change reconfigures
+#
 # EXAMPLE
 #   . ~/volume/.toolchain/env.sh && 3ds/ruby/build.sh --jobs 3
 set -euo pipefail
@@ -125,6 +129,7 @@ CFLAGS_3DS="-std=gnu17 ${ARCH_FLAGS[*]} -ffunction-sections -fdata-sections -O2 
 -DTRANSIENT_HEAP_TOTAL_SIZE=0x400000 -DUSE_THREAD_CACHE=0 \
 -I$HERE/shim/include -include rb3ds_compat.h \
 -I$DEVKITPRO/libctru/include -I$DEVKITPRO/portlibs/3ds/include"
+CFLAGS_3DS+="${RB3DS_EXTRA_CFLAGS:+ $RB3DS_EXTRA_CFLAGS}"
 CONF_ARGS=(
       --host=arm-none-eabi --prefix=/
       --with-baseruby="$BASERUBY"
