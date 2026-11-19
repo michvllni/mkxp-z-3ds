@@ -98,7 +98,7 @@ int main(int argc, char *argv[]) {
 	    (argc > 1 && argv[1] && argv[1][0]) ? std::string(argv[1]) : rmxp3dsPickGame(error);
 	const char *gameDir = gameDirStr.c_str();
 	if (gameDirStr.empty() && error.empty()) left = true;
-	if (!left) printf("mkxp-z-3ds %s\ngame: %s\n", MKXPZ_VERSION, gameDir);
+	if (!left && error.empty()) printf("mkxp-z-3ds %s\ngame: %s\n", MKXPZ_VERSION, gameDir);
 	if (left || !error.empty()) {
 		// nothing to start
 	} else if (chdir(gameDir) != 0) {
@@ -178,6 +178,7 @@ int main(int argc, char *argv[]) {
 			gl3dsAptResumed(); // releases rendering paused for HOME/sleep (nothing renders any more)
 			hidScanInput();
 			if (hidKeysDown() & KEY_START) break;
+			gfxFlushBuffers(); // the console writes to the cached framebuffer
 			gspWaitForVBlank();
 		}
 		status = 1;

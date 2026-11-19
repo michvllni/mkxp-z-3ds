@@ -76,10 +76,10 @@ std::vector<Game> findGames() {
 		}
 		closedir(d);
 	}
-	std::sort(games.begin(), games.end(), [](const Game &a, const Game &b) { return a.dir < b.dir; });
-	// The single-game directory counts even without Game.ini: the runtime checks start from there
-	// with only mkxp.json and a script (rmxp3ds tests/runtime).
-	if (isDir(SINGLE_GAME_DIR)) {
+	std::sort(games.begin(), games.end(),
+	          [](const Game &a, const Game &b) { return strcasecmp(a.dir.c_str(), b.dir.c_str()) < 0; });
+	// The single-game directory (kits, rmxp3ds runtime checks: they all write mkxp.json there).
+	if (isGameDir(SINGLE_GAME_DIR)) {
 		std::string title = iniTitle(SINGLE_GAME_DIR);
 		games.push_back({SINGLE_GAME_DIR, (title.empty() ? std::string("game") : title) + " (rmxp3ds/game)"});
 	}
@@ -117,6 +117,7 @@ void drawList(const std::vector<Game> &games, int sel) {
 	}
 	for (int i = last - first; i < LIST_ROWS; ++i) printf("\n");
 	printf("\nUp/Down/Left/Right: select\nA: start   START: exit");
+	gfxFlushBuffers(); // the console writes to the cached framebuffer (libctru console examples)
 }
 } // namespace
 
@@ -124,7 +125,7 @@ std::string rmxp3dsPickGame(std::string &error) {
 	error.clear();
 	std::vector<Game> games = findGames();
 	if (games.empty()) {
-		error = "no game found: copy a package from rmxp3ds-convert to sdmc:/rmxp3ds/games/<name>/";
+		error = "no game found.\nCopy a converted game to\nsdmc:/rmxp3ds/games/<name>/";
 		return "";
 	}
 	if (games.size() == 1) return games[0].dir;
