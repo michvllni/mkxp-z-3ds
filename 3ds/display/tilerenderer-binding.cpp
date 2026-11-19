@@ -20,7 +20,20 @@
 #include "table.h"
 #include "viewport.h"
 
+#include <new>
+
 DEF_TYPE(TileRenderer);
+
+/* Runs a native call; std::bad_alloc becomes an MKXPError (raised as a Ruby error by
+ * RB_METHOD_GUARD instead of terminating the app). */
+template<typename F> static void nativeCall(F f)
+{
+	try {
+		GFX_GUARD_EXC(f(););
+	} catch (const std::bad_alloc &) {
+		throw Exception(Exception::MKXPError, "tile renderer: out of memory");
+	}
+}
 
 static Table *tableOrNull(VALUE v)
 {
@@ -69,7 +82,7 @@ RB_METHOD_GUARD(tileRendererAddSource) {
 	TileRenderer *r = getPrivateData<TileRenderer>(self);
 	Bitmap *b = getPrivateDataCheck<Bitmap>(bitmapObj, BitmapType);
 	int handle = -1;
-	GFX_GUARD_EXC(handle = r->addSource(b, kind == 1 ? TileRenderer::Autotile : TileRenderer::Tileset, seconds););
+	nativeCall([&] { handle = r->addSource(b, kind == 1 ? TileRenderer::Autotile : TileRenderer::Tileset, seconds); });
 	return INT2NUM(handle);
 }
 RB_METHOD_GUARD_END
@@ -78,7 +91,7 @@ RB_METHOD_GUARD(tileRendererRemoveSource) {
 	int handle;
 	rb_get_args(argc, argv, "i", &handle RB_ARG_END);
 	TileRenderer *r = getPrivateData<TileRenderer>(self);
-	GFX_GUARD_EXC(r->removeSource(handle););
+	nativeCall([&] { r->removeSource(handle); });
 	return Qnil;
 }
 RB_METHOD_GUARD_END
@@ -124,7 +137,12 @@ RB_METHOD_GUARD(tileRendererUpdate) {
 	TileRenderer *r = getPrivateData<TileRenderer>(self);
 	validateMaps(mapsObj);
 
-	std::vector<TileRenderer::MapInput> maps(RARRAY_LEN(mapsObj));
+	std::vector<TileRenderer::MapInput> maps;
+	try {
+		maps.resize(RARRAY_LEN(mapsObj));
+	} catch (const std::bad_alloc &) {
+		throw Exception(Exception::MKXPError, "tile renderer: out of memory");
+	}
 	for (long i = 0; i < RARRAY_LEN(mapsObj); ++i) {
 		VALUE m = rb_ary_entry(mapsObj, i);
 		TileRenderer::MapInput &in = maps[i];
@@ -140,7 +158,7 @@ RB_METHOD_GUARD(tileRendererUpdate) {
 		handleList(rb_ary_entry(m, 6), in.largeExtras);
 		handleList(rb_ary_entry(m, 7), in.singleExtras);
 	}
-	GFX_GUARD_EXC(r->update(maps, px, py, RTEST(bridgeObj), seconds););
+	nativeCall([&] { r->update(maps, px, py, RTEST(bridgeObj), seconds); });
 	return Qnil;
 }
 RB_METHOD_GUARD_END
