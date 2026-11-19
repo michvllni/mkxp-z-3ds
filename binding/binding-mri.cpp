@@ -94,6 +94,7 @@ void windowVXBindingInit();
 void tilemapVXBindingInit();
 #ifdef __3DS__
 void rmxp3dsTileRendererBindingInit(); // mkxp-z-3ds: native Essentials map renderer (3ds/display)
+void rmxp3dsProfileBindingInit(); // mkxp-z-3ds: frame profile (3ds/display/frameprofile.cpp)
 #endif
 
 void inputBindingInit();
@@ -178,6 +179,7 @@ static void mriBindingInit() {
         tilemapBindingInit();
 #ifdef __3DS__
         rmxp3dsTileRendererBindingInit(); // mkxp-z-3ds
+        rmxp3dsProfileBindingInit(); // mkxp-z-3ds
 #endif
     } else {
         windowVXBindingInit();

@@ -96,7 +96,8 @@ list(TRANSFORM UPSTREAM_SOURCES PREPEND "${MKXP_ROOT}/")
 set(PLATFORM_SOURCES
   platform/main3ds.cpp platform/eventthread3ds.cpp platform/filesystemImpl3ds.cpp
   platform/systemImpl3ds.cpp platform/audio3ds.cpp platform/net3ds.cpp
-  display/gl3ds.cpp display/tilerenderer.cpp display/tilerenderer-binding.cpp)
+  display/gl3ds.cpp display/tilerenderer.cpp display/tilerenderer-binding.cpp
+  display/frameprofile.cpp)
 
 add_executable(mkxp-z ${UPSTREAM_SOURCES} ${PLATFORM_SOURCES})
 add_dependencies(mkxp-z mkxp_embedded mkxp_git_hash)

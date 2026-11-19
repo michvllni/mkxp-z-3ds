@@ -25,6 +25,7 @@
 #include "alstream.h"
 #else
 #include "gl3ds.h"
+#include "frameprofile.h" // mkxp-z-3ds: present path timing
 #endif
 #include "audio.h"
 #include "binding.h"
@@ -1075,7 +1076,12 @@ struct GraphicsPrivate {
     
 private:
     template <typename... Args> void swapGLBufferImpl(const Vec2i &screenSize, TEXFBO &source, int scaleIsSpecial, Args... args) {
+#ifdef __3DS__ // mkxp-z-3ds: frame profile
+        { Rmxp3dsProfileScope prof(RP_LIMITER); fpsLimiter.delay(); }
+        Rmxp3dsProfileScope profBlit(RP_BLIT);
+#else
         fpsLimiter.delay();
+#endif
 
         GLMeta::blitBeginScreen(screenSize, scaleIsSpecial);
         GLMeta::blitSource(source, scaleIsSpecial);
@@ -1088,7 +1094,11 @@ private:
             FBO::clear();
             metaBlitBufferFlippedScaled(args...);
 #ifdef __3DS__ // mkxp-z-3ds: the top screen instead of an SDL window
-            gl3dsPresent();
+            {
+                Rmxp3dsProfileScope prof(RP_PRESENT);
+                gl3dsPresent();
+            }
+            rmxp3dsProfileFrame();
 #else
             SDL_GL_SwapWindow(threadData->window);
 #endif
@@ -1147,7 +1157,11 @@ public:
     }
     
     void redrawScreen() {
+#ifdef __3DS__ // mkxp-z-3ds: frame profile
+        { Rmxp3dsProfileScope prof(RP_COMPOSITE); screen.composite(); }
+#else
         screen.composite();
+#endif
         
         // maybe unspaghetti this later
         if (integerScaleStepApplicable() && !integerLastMileScaling)

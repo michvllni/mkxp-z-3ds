@@ -120,7 +120,10 @@ involved.
   - `src/display/plane.cpp`: the tiled path (no `npot_repeat` on the 3DS) places tiles at the
     viewport's position and scrolls with its origin, as the `npot_repeat` path does.
   - `binding/binding-mri.cpp` `showExc`: the uncaught-error text also goes to `rgssErrorMsg`.
-  - `binding/binding-mri.cpp`: registers `RMXP3DSTileRenderer` (RGSS1 only).
+  - `binding/binding-mri.cpp`: registers `RMXP3DSTileRenderer` (RGSS1 only) and `RMXP3DSProfile`.
+  - `src/display/graphics.cpp`: frame profile scopes around `composite`, the frame limiter, the
+    blit and `gl3dsPresent` (`display/frameprofile.{h,cpp}`; `RMXP3DSProfile.read` returns the
+    per-frame averages in ms, plus gl3ds draw, vertex transform and upload time and the draw count).
   - `src/util/encoding.h`: well-formed UTF-8 text without NUL bytes (configs, `Game.ini` title,
     Ruby `String#to_utf8`) is taken as is
     instead of guessing its charset, and an unknown guessed charset throws instead of crashing.
