@@ -137,8 +137,13 @@ involved.
   disabled.
 
 ## Running
-- **Game directory:** `argv[1]` when given (3dslink, launcher arguments), otherwise
-  `sdmc:/rmxp3ds/game`. `mkxp.json` and `Game.ini` are read from there, as upstream does. For
+- **Game directory:** `argv[1]` when given (3dslink, launcher arguments), otherwise the game
+  picker (`platform/gamepicker.cpp`) chooses it: every `sdmc:/rmxp3ds/games/<name>/` with a
+  `Game.ini` or `mkxp.json` (packages from rmxp3ds' converter) plus `sdmc:/rmxp3ds/game` if it
+  exists (kits and tests). One game starts directly; several are listed on the bottom screen
+  (D-pad selects, A starts, START exits; the last choice is kept in
+  `sdmc:/rmxp3ds/last-game.txt`). `mkxp.json` and `Game.ini` are read from the game directory,
+  as upstream does. For
   tests, `"customScript": "file.rb"` in `mkxp.json` runs a single script instead of
   `Data/Scripts.rxdata`.
 - **Controls:**

@@ -95,7 +95,7 @@ list(TRANSFORM UPSTREAM_SOURCES PREPEND "${MKXP_ROOT}/")
 # net/net.cpp, display/gl/gl-fun.cpp.
 set(PLATFORM_SOURCES
   platform/main3ds.cpp platform/eventthread3ds.cpp platform/filesystemImpl3ds.cpp
-  platform/systemImpl3ds.cpp platform/audio3ds.cpp platform/net3ds.cpp
+  platform/systemImpl3ds.cpp platform/audio3ds.cpp platform/net3ds.cpp platform/gamepicker.cpp
   display/gl3ds.cpp display/tilerenderer.cpp display/tilerenderer-binding.cpp
   display/frameprofile.cpp)
 

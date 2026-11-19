@@ -9,7 +9,8 @@
 //   overflow check. It runs one priority level below the main thread on the same core, so input
 //   is read as soon as a vertical blank arrives.
 // - The game directory is argv[1] if given (3dslink / homebrew launcher arguments), otherwise
-//   sdmc:/rmxp3ds/game. Config (mkxp.json) and Game.ini are read from there, as upstream.
+//   chosen by the game picker (gamepicker.h: sdmc:/rmxp3ds/games/<name>/ and
+//   sdmc:/rmxp3ds/game). Config (mkxp.json) and Game.ini are read from there, as upstream.
 // - No window, OpenGL context or OpenAL device: the GL function table is the 3DS one (gl3ds.cpp).
 // - Without 3dslink, stderr goes to sdmc:/rmxp3ds/mkxp-stderr.txt (Ruby errors, Debug() output).
 #define SDL_MAIN_HANDLED // our own main(); SDL_main.h would rename it
@@ -31,6 +32,7 @@
 #include "eventthread.h"
 #include "exception.h"
 #include "gl-fun.h"
+#include "gamepicker.h"
 #include "gl3ds.h"
 #include "keybindings.h"
 #include "rb3ds.h"
@@ -43,7 +45,6 @@ u32 __stacksize__ = 256 * 1024;
 
 namespace {
 const size_t RGSS_STACK_SIZE = 1024 * 1024;
-const char *const DEFAULT_GAME_DIR = "sdmc:/rmxp3ds/game";
 const char *const STDERR_FILE = "sdmc:/rmxp3ds/mkxp-stderr.txt";
 const u32 SOC_BUFFER_SIZE = 0x100000;
 
@@ -88,18 +89,26 @@ int main(int argc, char *argv[]) {
 	u32 *socBuffer = connect3dslink();
 	if (!socBuffer && freopen(STDERR_FILE, "w", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
 
-	const char *gameDir = (argc > 1 && argv[1] && argv[1][0]) ? argv[1] : DEFAULT_GAME_DIR;
-	printf("mkxp-z-3ds %s\ngame: %s\n", MKXPZ_VERSION, gameDir);
 	int status = 0;
 	bool stuck = false;
+	bool left = false; // the user left the game picker: exit without an error screen
 	std::string error;
 	std::string argv0; // outlives the RGSS thread (stuck case: until the process ends)
-	if (chdir(gameDir) != 0) error = std::string("cannot enter the game directory ") + gameDir;
+	std::string gameDirStr =
+	    (argc > 1 && argv[1] && argv[1][0]) ? std::string(argv[1]) : rmxp3dsPickGame(error);
+	const char *gameDir = gameDirStr.c_str();
+	if (gameDirStr.empty() && error.empty()) left = true;
+	if (!left) printf("mkxp-z-3ds %s\ngame: %s\n", MKXPZ_VERSION, gameDir);
+	if (left || !error.empty()) {
+		// nothing to start
+	} else if (chdir(gameDir) != 0) {
+		error = std::string("cannot enter the game directory ") + gameDir;
+	}
 
 	SDL_SetMainReady();
-	if (error.empty() && SDL_Init(SDL_INIT_TIMER) < 0) error = std::string("SDL_Init: ") + SDL_GetError();
+	if (!left && error.empty() && SDL_Init(SDL_INIT_TIMER) < 0) error = std::string("SDL_Init: ") + SDL_GetError();
 
-	if (error.empty()) {
+	if (!left && error.empty()) {
 		// Config::read only looks at argv[1..] for "debug"/"test"/"btest"; the game directory
 		// argument is handled above.
 		// argv[0] must be a path: PhysFS derives its base directory from it. Loaders that start
