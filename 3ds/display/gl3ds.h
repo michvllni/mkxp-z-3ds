@@ -7,4 +7,8 @@
 // Graphics where the desktop build calls SDL_GL_SwapWindow (hook in src/display/graphics.cpp).
 void gl3dsPresent();
 
+// Called by the main thread after every aptMainLoop(): resumes rendering paused for HOME or sleep
+// mode (gl3ds.cpp, gpuLock).
+void gl3dsAptResumed();
+
 #endif

@@ -664,9 +664,15 @@ GrayShader::GrayShader()
 
 bool GrayShader::framebufferScalingAllowed()
 {
+#ifdef __3DS__
+	// mkxp-z-3ds: the screen quad it draws is in game coordinates on the 3DS (ScreenScene in
+	// graphics.cpp), so it takes the scaled projection like the other screen effects
+	return true;
+#else
 	// This shader is used with input textures that have already had a
 	// framebuffer scale applied. So we don't want to double-apply it.
 	return false;
+#endif
 }
 
 void GrayShader::setGray(float value)

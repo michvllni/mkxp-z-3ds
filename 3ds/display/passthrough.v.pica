@@ -1,23 +1,26 @@
 ; SPDX-License-Identifier: GPL-2.0-or-later
 ; mkxp-z-3ds: the only vertex shader of the 3DS renderer. gl3ds.cpp runs mkxp-z's vertex programs
 ; on the CPU (projection, sprite matrix, texture coordinates) and passes finished vertices:
-; v0 clip-space position, v1 texture coordinate 0, v2 color, v3 texture coordinate 1 (all floats;
-; unit 1 is the destination of Bitmap#blt).
+; v0 clip-space position, v1 texture coordinate 0, v2 color, v3/v4 texture coordinates 1/2
+; (all floats; one per PICA texture unit).
 
 .out outpos position
 .out outtc0 texcoord0
 .out outclr color
 .out outtc1 texcoord1
+.out outtc2 texcoord2
 
 .alias inpos v0
 .alias intc0 v1
 .alias inclr v2
 .alias intc1 v3
+.alias intc2 v4
 
 .proc main
 	mov outpos, inpos
 	mov outtc0, intc0
 	mov outclr, inclr
 	mov outtc1, intc1
+	mov outtc2, intc2
 	end
 .end

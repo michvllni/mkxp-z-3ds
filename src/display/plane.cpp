@@ -132,8 +132,14 @@ struct PlanePrivate
 		float sh = bitmap->height() * zoomY;
 
 		/* Plane offset wrapped by scaled bitmap dims */
+#ifdef __3DS__
+		// mkxp-z-3ds: like the npot_repeat path above, the viewport origin scrolls the plane
+		float wox = fwrap(ox + sceneGeo.orig.x, sw);
+		float woy = fwrap(oy + sceneGeo.orig.y, sh);
+#else
 		float wox = fwrap(ox, sw);
 		float woy = fwrap(oy, sh);
+#endif
 
 		/* Viewport dimensions */
 		int vpw = sceneGeo.rect.w;
@@ -151,7 +157,14 @@ struct PlanePrivate
 			for (size_t x = 0; x < tilesX; ++x)
 			{
 				SVertex *vert = &qArray.vertices[(y*tilesX + x) * 4];
+#ifdef __3DS__
+				// mkxp-z-3ds: tiles start at the viewport's position (as geo.rect in the
+				// npot_repeat path); without it, planes in viewports are drawn at the screen
+				// origin and scissored away
+				FloatRect pos(sceneGeo.rect.x + x*sw - wox, sceneGeo.rect.y + y*sh - woy, sw, sh);
+#else
 				FloatRect pos(x*sw - wox, y*sh - woy, sw, sh);
+#endif
 
 				Quad::setTexPosRect(vert, tex, pos);
 			}
