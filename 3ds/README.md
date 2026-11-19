@@ -110,6 +110,11 @@ involved.
   - `src/display/plane.cpp`: the tiled path (no `npot_repeat` on the 3DS) places tiles at the
     viewport's position and scrolls with its origin, as the `npot_repeat` path does.
   - `binding/binding-mri.cpp` `showExc`: the uncaught-error text also goes to `rgssErrorMsg`.
+  - `src/util/encoding.h`: well-formed UTF-8 text (configs, `Game.ini` title) is taken as is
+    instead of guessing its charset, and an unknown guessed charset throws instead of crashing.
+    uchardet guesses mostly ASCII text with a few UTF-8 characters wrongly (Essentials'
+    `mkxp.json`: `MAC-CENTRALEUROPE`, a name libiconv doesn't know; `iconv()` then wrote
+    through the failed handle).
 - **MIDI:** fluidsynth is loaded at run time as on desktop. That fails on the 3DS, so MIDI is
   disabled.
 
