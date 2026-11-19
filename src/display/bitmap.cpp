@@ -4257,6 +4257,9 @@ void Bitmap::releaseResources()
     // (2 MB of linear memory for a 640x480 snapshot on the 3DS).
     if (p->surface)
         SDL_FreeSurface(p->surface);
+    // the pooled texture must not keep a pointer to this bitmap's high-res twin (deleted above);
+    // the 3DS build creates no twins, so this only guards a later change
+    p->gl.selfHires = nullptr;
     if (p->animation.enabled) {
 #else
     if (p->surface)
