@@ -92,6 +92,9 @@ void windowBindingInit();
 void tilemapBindingInit();
 void windowVXBindingInit();
 void tilemapVXBindingInit();
+#ifdef __3DS__
+void rmxp3dsTileRendererBindingInit(); // mkxp-z-3ds: native Essentials map renderer (3ds/display)
+#endif
 
 void inputBindingInit();
 void audioBindingInit();
@@ -173,6 +176,9 @@ static void mriBindingInit() {
     if (rgssVer == 1) {
         windowBindingInit();
         tilemapBindingInit();
+#ifdef __3DS__
+        rmxp3dsTileRendererBindingInit(); // mkxp-z-3ds
+#endif
     } else {
         windowVXBindingInit();
         tilemapVXBindingInit();

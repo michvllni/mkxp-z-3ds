@@ -1130,10 +1130,11 @@ const GLubyte *APIENTRY getString(GLenum name) {
 
 void APIENTRY getIntegerv(GLenum pname, GLint *params) {
 	switch (pname) {
-	// The PICA200 limit is 1024 px, but mkxp-z sizes its tileset atlas by this value: with 1024,
-	// tilesets taller than about 1300 px are rejected. Textures above 1024 px are not stored yet
-	// (they will be split into pieces inside this table).
-	case GL_MAX_TEXTURE_SIZE: *params = 4096; break;
+	// The PICA200 limit. Larger bitmaps become CPU "mega surfaces" in mkxp-z: the native
+	// Essentials map renderer (tilerenderer.cpp, rmxp3ds D17) slices them into 1024 px atlas pages.
+	// mkxp-z's RGSS Tilemap rejects tilesets taller than about 1300 px at this size; the rmxp3ds
+	// converter splits those (PLAN 3.2).
+	case GL_MAX_TEXTURE_SIZE: *params = 1024; break;
 	case GL_MAX_TEXTURE_IMAGE_UNITS: *params = 3; break;
 	case GL_MAX_VERTEX_ATTRIBS: *params = 12; break;
 	case GL_VIEWPORT: memcpy(params, st.viewport, sizeof st.viewport); break;
