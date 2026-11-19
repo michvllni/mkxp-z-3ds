@@ -69,11 +69,12 @@ static std::string convertString(std::string &str, const char *charset) {
 
 #ifdef __3DS__
 // mkxp-z-3ds: true if str is well-formed UTF-8 (no overlong forms, surrogates or code points
-// above U+10FFFF).
+// above U+10FFFF) without NUL bytes (UTF-16/32 text without a BOM still goes to uchardet).
 static bool isUtf8(const std::string &str) {
     const unsigned char *p = (const unsigned char *)str.data(), *end = p + str.size();
     while (p < end) {
         unsigned char c = *p++;
+        if (c == 0) return false;
         if (c < 0x80) continue;
         int n; unsigned int cp, min;
         if ((c & 0xE0) == 0xC0) { n = 1; cp = c & 0x1F; min = 0x80; }
