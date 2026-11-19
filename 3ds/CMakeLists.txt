@@ -119,10 +119,13 @@ target_compile_options(mkxp-z PRIVATE -Wno-deprecated-declarations)
 # Static libraries reference each other (Ruby, SDL, FreeType); one link group resolves any order.
 target_link_libraries(mkxp-z PRIVATE
   -Wl,--start-group
-  # extinit.a before libruby-static.a: both define Init_ext (libruby's dmyext.o is empty) and the
-  # first archive in the group wins; with the empty one, `require 'zlib'` fails.
-  "${RUBY3DS_DIR}/build/ext/extinit.a" "${RUBY3DS_DIR}/build/libruby-static.a"
-  "${RUBY3DS_DIR}/build/ext/zlib/zlib.a" "${RUBY3DS_DIR}/build/enc/encinit.a"
+  # extinit.a and encinit.a before libruby-static.a: they define Init_ext and Init_enc, which
+  # libruby's dmyext.o and dmyenc.o define empty, and the first archive in the group wins. With
+  # the empty ones, `require 'zlib'` fails and only the built-in encodings exist, without their
+  # constants (Encoding::UTF_8 is a NameError).
+  "${RUBY3DS_DIR}/build/ext/extinit.a" "${RUBY3DS_DIR}/build/enc/encinit.a"
+  "${RUBY3DS_DIR}/build/libruby-static.a"
+  "${RUBY3DS_DIR}/build/ext/zlib/zlib.a"
   "${RUBY3DS_DIR}/build/enc/libenc.a" "${RUBY3DS_DIR}/build/enc/libtrans.a"
   "${RUBY3DS_DIR}/shim/librb3dsshim.a"
   "${DEPS3DS_DIR}/lib/libSDL2_ttf.a" "${DEPS3DS_DIR}/lib/libSDL2_image.a" "${DEPS3DS_DIR}/lib/libSDL2.a"
