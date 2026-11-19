@@ -236,7 +236,10 @@ struct TileLayer : public ViewportElement
 			});
 			for (const std::array<int, 3> &t : v) {
 				int page = t[0] / SLOTS_PER_PAGE, i = t[0] % SLOTS_PER_PAGE;
-				FloatRect tex((i % SLOTS_PER_ROW) * TILE, (i / SLOTS_PER_ROW) * TILE, TILE, TILE);
+				/* half a texel inset: at scales below 1:1 (Hires 0.625) tile edges fall between
+				 * screen pixels, and edge samples would otherwise reach the neighbouring atlas
+				 * slot (another tile or transparent: black seams while scrolling) */
+				FloatRect tex((i % SLOTS_PER_ROW) * TILE + 0.5f, (i / SLOTS_PER_ROW) * TILE + 0.5f, TILE - 1.0f, TILE - 1.0f);
 				FloatRect pos(t[1], t[2], TILE, TILE);
 				Quad::setTexPosRect(&quads.vertices[q * 4], tex, pos);
 				if (!ranges.empty() && ranges.back().page == page && ranges.back().offset + ranges.back().count == q)
