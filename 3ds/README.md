@@ -95,6 +95,12 @@ involved.
   - `src/display/gl/texpool.h`: the pool of disposed bitmaps keeps 4 MB instead of 20 MB.
   - `src/display/tilemap.cpp`: tile texture insets stay half a texel below 1:1 scaling.
   - `binding/binding-mri.cpp` `showExc`: the uncaught-error text also goes to `rgssErrorMsg`.
+  - `src/util/encoding.h`: well-formed UTF-8 text without NUL bytes (configs, `Game.ini` title,
+    Ruby `String#to_utf8`) is taken as is
+    instead of guessing its charset, and an unknown guessed charset throws instead of crashing.
+    uchardet guesses mostly ASCII text with a few UTF-8 characters wrongly (Essentials'
+    `mkxp.json`: `MAC-CENTRALEUROPE`, a name libiconv doesn't know; `iconv()` then wrote
+    through the failed handle).
 - **MIDI:** fluidsynth is loaded at run time as on desktop. That fails on the 3DS, so MIDI is
   disabled.
 
