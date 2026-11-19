@@ -4251,9 +4251,18 @@ void Bitmap::releaseResources()
 
     if (p->megaSurface)
         SDL_FreeSurface(p->megaSurface);
+#ifdef __3DS__
+    // mkxp-z-3ds: the CPU copy made by getPixel/setPixel (p->surface) is freed in addition to the
+    // texture, not instead of it: upstream leaked the texture of every bitmap read with get_pixel
+    // (2 MB of linear memory for a 640x480 snapshot on the 3DS).
+    if (p->surface)
+        SDL_FreeSurface(p->surface);
+    if (p->animation.enabled) {
+#else
     if (p->surface)
         SDL_FreeSurface(p->surface);
     else if (p->animation.enabled) {
+#endif
         p->animation.enabled = false;
         p->animation.playing = false;
         for (TEXFBO &tex : p->animation.frames)
