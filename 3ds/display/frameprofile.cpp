@@ -3,8 +3,10 @@
 #include "frameprofile.h"
 
 #include "binding-util.h"
+#include "gl3ds.h"
 
 #include <3ds.h>
+#include <malloc.h>
 
 static uint64_t ticks[RP_COUNT];
 static uint64_t frames;
@@ -25,6 +27,18 @@ RB_METHOD(rmxp3dsProfileRead) {
 		ticks[i] = 0;
 	}
 	frames = 0;
+	/* memory now, in KiB: linear (textures, command buffers), VRAM, heap (malloc) */
+	struct mallinfo mi = mallinfo();
+	rb_hash_aset(h, rb_str_new_cstr("linear_free_kb"), UINT2NUM(linearSpaceFree() / 1024));
+	rb_hash_aset(h, rb_str_new_cstr("vram_free_kb"), UINT2NUM(vramSpaceFree() / 1024));
+	rb_hash_aset(h, rb_str_new_cstr("heap_used_kb"), UINT2NUM((unsigned)mi.uordblks / 1024));
+	rb_hash_aset(h, rb_str_new_cstr("heap_free_kb"), UINT2NUM((unsigned)mi.fordblks / 1024));
+	unsigned lin, vram, count, dead;
+	gl3dsTextureStats(&lin, &vram, &count, &dead);
+	rb_hash_aset(h, rb_str_new_cstr("tex_linear_kb"), UINT2NUM(lin));
+	rb_hash_aset(h, rb_str_new_cstr("tex_vram_kb"), UINT2NUM(vram));
+	rb_hash_aset(h, rb_str_new_cstr("tex_count"), UINT2NUM(count));
+	rb_hash_aset(h, rb_str_new_cstr("tex_dead_kb"), UINT2NUM(dead));
 	return h;
 }
 

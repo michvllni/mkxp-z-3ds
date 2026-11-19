@@ -1527,6 +1527,20 @@ void APIENTRY deleteVertexArrays(GLsizei n, const GLuint *a) {
 void APIENTRY bindVertexArray(GLuint a) { st.boundVertexArray = a; }
 } // namespace
 
+// Texture memory known to gl3ds (frame profile): allocated textures in linear memory and VRAM
+// (KiB) and their count, plus textures waiting for deferred deletion.
+void gl3dsTextureStats(unsigned *linearKb, unsigned *vramKb, unsigned *count, unsigned *deadKb) {
+	size_t lin = 0, vram = 0, dead = 0;
+	unsigned n = 0;
+	for (auto &kv : st.textures) {
+		if (!kv.second.allocated) continue;
+		++n;
+		(kv.second.inVram ? vram : lin) += kv.second.tex.size;
+	}
+	for (C3D_Tex &t : st.deadTextures) dead += t.size;
+	*linearKb = lin / 1024, *vramKb = vram / 1024, *count = n, *deadKb = dead / 1024;
+}
+
 void gl3dsAptResumed() {
 	if (!aptHeld) return;
 	aptHeld = false;

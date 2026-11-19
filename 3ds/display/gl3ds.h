@@ -10,5 +10,7 @@ void gl3dsPresent();
 // Called by the main thread after every aptMainLoop(): resumes rendering paused for HOME or sleep
 // mode (gl3ds.cpp, gpuLock).
 void gl3dsAptResumed();
+// Texture memory known to gl3ds, for the frame profile (KiB, count).
+void gl3dsTextureStats(unsigned *linearKb, unsigned *vramKb, unsigned *count, unsigned *deadKb);
 
 #endif

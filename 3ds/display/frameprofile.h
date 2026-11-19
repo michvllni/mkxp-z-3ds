@@ -2,7 +2,8 @@
 // frameprofile.h: per-frame timing of the 3DS present path (mkxp-z-3ds), read from Ruby as
 // RMXP3DSProfile.read -> {"frames"=>n, "composite", "limiter", "blit", "present", "gl_draw",
 // "gl_upload", "gl_xform" (ms per presented frame), "draws" (count per frame)}; averages since
-// the last read, counters reset on read. composite, limiter, blit and present are disjoint parts
+// the last read, counters reset on read. Also "linear_free_kb", "vram_free_kb", "heap_used_kb",
+// "heap_free_kb" (memory at the time of the read). composite, limiter, blit and present are disjoint parts
 // of a presented frame. Frames skipped by the frame limiter, frozen frames and repaintWait are
 // not counted (frame skip is off in rmxp3ds). Cheap: a few svcGetSystemTick calls per frame.
 #ifndef RMXP3DS_FRAMEPROFILE_H
