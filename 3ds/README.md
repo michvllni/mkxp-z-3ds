@@ -62,8 +62,9 @@ involved.
   - presenting to the top screen.
 
   **Missing:**
-  - Textures over 1024 px (stored as pieces later; the table reports 4096 so mkxp-z's tileset
-    atlas fits real tilesets).
+  - Textures over 1024 px: the GL table reports 1024, so larger bitmaps stay CPU "mega
+    surfaces" (mkxp-z). Drawing one directly is not possible; mkxp-z's RGSS Tilemap rejects
+    tilesets taller than about 1300 px (the rmxp3ds converter splits them).
   - Sprite patterns (mkxp-z extension).
   - Hue, blur and the remaining programs (drawn as plain texture, logged once).
 - **Screen resolution (rmxp3ds D15):** the game screen is rendered at 3DS height, pillarboxed.
@@ -82,6 +83,15 @@ involved.
 | `src/net/net.cpp` (cpp-httplib) | `platform/net3ds.cpp` | HTTPLite raises "not available" |
 | `src/display/gl/gl-fun.cpp` | `display/gl3ds.cpp` | the GL function table (see above) |
 
+- **Native Essentials map renderer** (`display/tilerenderer.{h,cpp}`, Ruby class
+  `RMXP3DSTileRenderer`, rmxp3ds D17): draws Pokémon Essentials v21 maps instead of its Ruby
+  `TilemapRenderer`. The rmxp3ds patch `patches/essentials-v21/tilemap_renderer.rb` (preload
+  script) keeps Essentials' interface and passes the maps on screen per frame. The atlas is made
+  of 1024x1024 pages with 32x32 slots: tileset tiles are copied, and RMXP block autotiles are
+  composed per frame from their 16x16 pieces (`autotileRects`), so no texture exceeds 1024 px.
+  Z order follows Essentials' tile sprites: scene elements at z -100 (reflective water), z 0
+  (ground) and 32*k+1 (priorities), created before the character sprites. Within an element,
+  layers 0, 1 and 2 draw in that order, batched per atlas page.
 - **Hooks in upstream files**, all marked `mkxp-z-3ds` and inert on other platforms:
   - `src/system/system.h`: `MKXPZ_PLATFORM_3DS`.
   - `binding/binding-mri.cpp`: `System.platform` returns "Nintendo 3DS".
@@ -110,6 +120,7 @@ involved.
   - `src/display/plane.cpp`: the tiled path (no `npot_repeat` on the 3DS) places tiles at the
     viewport's position and scrolls with its origin, as the `npot_repeat` path does.
   - `binding/binding-mri.cpp` `showExc`: the uncaught-error text also goes to `rgssErrorMsg`.
+  - `binding/binding-mri.cpp`: registers `RMXP3DSTileRenderer` (RGSS1 only).
   - `src/util/encoding.h`: well-formed UTF-8 text without NUL bytes (configs, `Game.ini` title,
     Ruby `String#to_utf8`) is taken as is
     instead of guessing its charset, and an unknown guessed charset throws instead of crashing.
