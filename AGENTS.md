@@ -57,8 +57,11 @@ The toolchain comes from the rmxp3ds dev container (or its `tools/setup-workspac
 runs on a thread other than main() (the runtime's "rgss" thread).
 
 ## Pitfalls
-- Link `ext/extinit.a` before `libruby-static.a`: both define `Init_ext` (libruby's `dmyext.o` is
-  empty), and with the wrong order `require 'zlib'` fails.
+- Link `ext/extinit.a` and `enc/encinit.a` before `libruby-static.a`: they define `Init_ext` and
+  `Init_enc`, which libruby's `dmyext.o`/`dmyenc.o` define empty, and the first archive in the link
+  group wins. With the wrong order `require 'zlib'` fails, and only the built-in encodings exist
+  without constants (`Encoding::UTF_8` is a NameError: Pokémon Essentials stops in its first
+  script section).
 - devkitPro's SDL2 headers rename `main` to `SDL_main`; the 3DS `main()` defines `SDL_MAIN_HANDLED`.
 - PhysFS derives its base directory from argv[0]. Launchers may start the app without arguments,
   so `main3ds.cpp` substitutes a path inside the game directory.
