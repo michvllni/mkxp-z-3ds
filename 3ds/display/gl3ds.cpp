@@ -837,14 +837,6 @@ inline void mulMat4(const float *m, const float *v, float out[4]) {
 	for (int r = 0; r < 4; r++) out[r] = m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3];
 }
 
-const uint8_t *attribData(const AttribPointer &a, size_t vertex) {
-	auto it = st.buffers.find(a.buffer);
-	if (it == st.buffers.end()) return nullptr;
-	size_t off = a.offset + vertex * (size_t)a.stride;
-	if (off + a.size * sizeof(float) > it->second.data.size()) return nullptr;
-	return it->second.data.data() + off;
-}
-
 // One vertex attribute of a draw, resolved once per draw: base pointer, stride, vertex count.
 struct AttribSource {
 	const uint8_t *base = nullptr;
@@ -859,6 +851,7 @@ AttribSource attribSource(const AttribPointer &a, bool enabled) {
 	if (it == st.buffers.end()) return s;
 	size_t size = it->second.data.size(), need = a.size * sizeof(float);
 	if (a.offset + need > size) return s;
+	if (need == 0) return s; // never set (size 0)
 	s.base = it->second.data.data() + a.offset;
 	s.stride = a.stride ? a.stride : need;
 	s.count = (size - a.offset - need) / s.stride + 1;

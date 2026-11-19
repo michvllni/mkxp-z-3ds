@@ -1076,9 +1076,9 @@ struct GraphicsPrivate {
     
 private:
     template <typename... Args> void swapGLBufferImpl(const Vec2i &screenSize, TEXFBO &source, int scaleIsSpecial, Args... args) {
-#ifdef __3DS__ // mkxp-z-3ds: frame profile
+#ifdef __3DS__ // mkxp-z-3ds: frame profile (blit: from here to gl3dsPresent)
         { Rmxp3dsProfileScope prof(RP_LIMITER); fpsLimiter.delay(); }
-        Rmxp3dsProfileScope profBlit(RP_BLIT);
+        uint64_t blitStart = rmxp3dsProfileTicks();
 #else
         fpsLimiter.delay();
 #endif
@@ -1094,10 +1094,12 @@ private:
             FBO::clear();
             metaBlitBufferFlippedScaled(args...);
 #ifdef __3DS__ // mkxp-z-3ds: the top screen instead of an SDL window
+            rmxp3dsProfileAdd(RP_BLIT, rmxp3dsProfileTicks() - blitStart);
             {
                 Rmxp3dsProfileScope prof(RP_PRESENT);
                 gl3dsPresent();
             }
+            blitStart = rmxp3dsProfileTicks();
             rmxp3dsProfileFrame();
 #else
             SDL_GL_SwapWindow(threadData->window);
