@@ -161,9 +161,11 @@ involved.
   These are mkxp-z's default controller bindings.
 - **Logs and messages:**
   - Without 3dslink, stderr (Ruby errors, `Debug()` output, `print`/`msgbox` text) goes to
-    `sdmc:/rmxp3ds/mkxp-stderr.txt`. Its last line is `exit: clean shutdown` when the app ended
-    through its normal teardown (also when closed from the HOME Menu): citro3d ended with
-    `C3D_Fini` (`gl3dsShutdown`), then `gfxExit`.
+    `sdmc:/rmxp3ds/mkxp-stderr.txt`. The shutdown writes one `exit: <step>` line per step (flushed),
+    ending with `exit: clean shutdown` after `C3D_Fini` (`gl3dsShutdown`) and `gfxExit`. When the
+    system closes the app (HOME Menu, power button), a watchdog (`platform/exitwatch.h`) ends the
+    process 8 s later if the shutdown has not finished, and logs the step it was stuck at, so
+    "Closing software" cannot hang.
   - Message boxes (`print`, `msgbox`) are printed on the bottom-screen console and do not block. A
     blocking box needs the renderer.
   - When the game ends with an error (initialisation error, uncaught Ruby exception: hook in

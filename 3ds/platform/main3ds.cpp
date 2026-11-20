@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <string>
 
 #include "binding.h"
@@ -32,6 +33,7 @@
 #include "eventthread.h"
 #include "exception.h"
 #include "gl-fun.h"
+#include "exitwatch.h"
 #include "gamepicker.h"
 #include "gl3ds.h"
 #include "keybindings.h"
@@ -61,6 +63,28 @@ u32 *connect3dslink() {
 	return nullptr;
 }
 
+const s64 EXIT_WATCHDOG_S = 8;
+const char *volatile exitStage = "running";
+bool watchdogStarted = false;
+
+// Ends the process when the shutdown takes longer than EXIT_WATCHDOG_S (see exitwatch.h). Runs
+// above the main thread's priority so that a busy main or RGSS thread cannot delay it.
+void watchdogFun(void *) {
+	svcSleepThread(EXIT_WATCHDOG_S * 1000 * 1000 * 1000LL);
+	fprintf(stderr, "exit: watchdog: still at \"%s\" after %d s, process ended\n", exitStage, (int)EXIT_WATCHDOG_S);
+	fflush(stderr);
+	svcExitProcess();
+}
+
+void startWatchdog() {
+	if (watchdogStarted) return;
+	watchdogStarted = true;
+	s32 prio = 0x30;
+	svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+	if (!threadCreate(watchdogFun, nullptr, 8 * 1024, std::max<s32>(0x18, prio - 2), -2, true))
+		fprintf(stderr, "exit: cannot start the watchdog\n");
+}
+
 // RGSS thread: GL table, shared state (filesystem, graphics, input, audio, fonts), then the
 // script binding (Ruby). Errors before the scripts run end up in rgssErrorMsg.
 void rgssThreadFun(void *userdata) {
@@ -75,10 +99,24 @@ void rgssThreadFun(void *userdata) {
 		return;
 	}
 	scriptBinding->execute();
+	rmxp3dsExitStep("scripts ended");
 	threadData->rqTermAck.set();
 	SharedState::finiInstance();
+	rmxp3dsExitStep("shared state finished");
 }
 } // namespace
+
+void rmxp3dsExitStep(const char *step) {
+	exitStage = step;
+	fprintf(stderr, "exit: %s\n", step);
+	fflush(stderr);
+}
+
+void rmxp3dsCloseRequested() {
+	if (watchdogStarted) return;
+	rmxp3dsExitStep("close requested by the system");
+	startWatchdog();
+}
 
 int main(int argc, char *argv[]) {
 	osSetSpeedupEnable(true);
@@ -147,10 +185,12 @@ int main(int argc, char *argv[]) {
 			} else {
 				eventThread->process(*rtData);
 				rtData->rqTerm.set();
+				rmxp3dsExitStep("waiting for the RGSS thread");
 				// Wait up to 10 s for the RGSS thread to acknowledge (as upstream).
 				for (int i = 0; i < 1000 && !rtData->rqTermAck; ++i) svcSleepThread(10 * 1000 * 1000LL);
 				if (rtData->rqTermAck) {
 					threadJoin(rgss, U64_MAX);
+					rmxp3dsExitStep("RGSS thread joined");
 					threadFree(rgss);
 				} else {
 					error = "the RGSS script seems to be stuck";
@@ -186,15 +226,17 @@ int main(int argc, char *argv[]) {
 	// A stuck RGSS thread still uses everything below: end the process without tearing down.
 	if (stuck) svcExitProcess();
 
+	startWatchdog(); // also when the game ended by itself: the teardown below must not hang
+	rmxp3dsExitStep("ending citro3d");
 	gl3dsShutdown();
-	// The last line in sdmc:/rmxp3ds/mkxp-stderr.txt: the process got this far (also when closed
-	// from the HOME Menu). A missing line means it ended earlier (stuck RGSS thread, crash).
-	fprintf(stderr, "exit: clean shutdown\n");
-	fflush(stderr);
+	rmxp3dsExitStep("gfxExit");
 	if (socBuffer) {
 		socExit();
 		free(socBuffer);
 	}
 	gfxExit();
+	// The last line in sdmc:/rmxp3ds/mkxp-stderr.txt when the teardown finished (also when closed
+	// from the HOME Menu). Otherwise the last "exit:" line names the step that did not finish.
+	rmxp3dsExitStep("clean shutdown");
 	return status;
 }

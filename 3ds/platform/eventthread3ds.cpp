@@ -6,6 +6,7 @@
 // maps through its default controller bindings (src/input/keybindings.cpp). It also handles the
 // APT loop: when the system asks the app to close, it requests termination of the RGSS thread.
 #include "eventthread.h"
+#include "exitwatch.h"
 
 #include <3ds.h>
 #include <SDL_mutex.h>
@@ -69,6 +70,7 @@ void EventThread::process(RGSSThreadData &rtData) {
 		bool running = aptMainLoop();
 		gl3dsAptResumed(); // rendering paused for HOME or sleep mode continues
 		if (!running) {
+			rmxp3dsCloseRequested();
 			rtData.rqTerm.set();
 			break;
 		}
