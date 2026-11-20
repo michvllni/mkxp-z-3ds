@@ -26,6 +26,7 @@
 // - Deletions are deferred until the GPU has finished every frame that may use the objects.
 #include "gl-fun.h"
 #include "gl3ds.h"
+#include "frameprofile.h"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -836,24 +837,74 @@ inline void mulMat4(const float *m, const float *v, float out[4]) {
 	for (int r = 0; r < 4; r++) out[r] = m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3];
 }
 
-const uint8_t *attribData(const AttribPointer &a, size_t vertex) {
+// One vertex attribute of a draw, resolved once per draw: base pointer, stride, vertex count.
+struct AttribSource {
+	const uint8_t *base = nullptr;
+	size_t stride = 0, count = 0; // count: vertices readable (bounds)
+	const float *at(size_t vi) const { return (base && vi < count) ? (const float *)(base + vi * stride) : nullptr; }
+};
+
+AttribSource attribSource(const AttribPointer &a, bool enabled) {
+	AttribSource s;
+	if (!enabled) return s;
 	auto it = st.buffers.find(a.buffer);
-	if (it == st.buffers.end()) return nullptr;
-	size_t off = a.offset + vertex * (size_t)a.stride;
-	if (off + a.size * sizeof(float) > it->second.data.size()) return nullptr;
-	return it->second.data.data() + off;
+	if (it == st.buffers.end()) return s;
+	size_t size = it->second.data.size(), need = a.size * sizeof(float);
+	if (a.offset + need > size) return s;
+	if (need == 0) return s; // never set (size 0)
+	s.base = it->second.data.data() + a.offset;
+	s.stride = a.stride ? a.stride : need;
+	s.count = (size - a.offset - need) / s.stride + 1;
+	return s;
+}
+
+// Everything transformVertex needs that is constant during a draw (uniforms by name, buffer
+// lookups, texture scales): resolved once per draw instead of once per vertex.
+const float XFORM_IDENTITY[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+struct Xform {
+	const float *proj = XFORM_IDENTITY, *model = nullptr, *texSizeInv = nullptr, *subRect = nullptr;
+	float tx = 0, ty = 0;
+	bool screen = false, tilemap = false, blit = false;
+	const float *aniIndex = nullptr, *atFrames = nullptr; // tilemap.vert autotile animation
+	AttribSource pos, tc, color;
+	float scaleU[3] = {1, 1, 1}, scaleV[3] = {1, 1, 1}; // logical -> padded texture per unit
+};
+
+Xform makeXform(const Program *prog, const VertexArray &va, bool screen, Tex *const tex[3]) {
+	Xform x;
+	if (const float *pm = prog->get("projMat")) x.proj = pm;
+	x.texSizeInv = prog->get("texSizeInv");
+	x.model = prog->vert == VertKind::Sprite ? prog->get("spriteMat")
+	          : prog->vert == VertKind::SimpleMatrix ? prog->get("matrix")
+	                                                 : nullptr;
+	const float *translation = prog->get("translation");
+	if (translation && (prog->vert == VertKind::Simple || prog->vert == VertKind::SimpleColor || prog->vert == VertKind::Tilemap))
+		x.tx = translation[0], x.ty = translation[1];
+	x.screen = screen;
+	x.tilemap = prog->vert == VertKind::Tilemap;
+	if (x.tilemap) {
+		x.aniIndex = prog->get("aniIndex");
+		x.atFrames = prog->get("atFrames");
+	}
+	x.blit = prog->frag == FragKind::Blit;
+	if (x.blit) x.subRect = prog->get("subRect");
+	x.pos = attribSource(va.attribs[0], true);
+	x.tc = attribSource(va.attribs[1], va.attribs[1].enabled);
+	x.color = attribSource(va.attribs[2], va.attribs[2].enabled);
+	for (int i = 0; i < 3; i++)
+		if (tex[i]) x.scaleU[i] = (float)tex[i]->w / tex[i]->pw, x.scaleV[i] = (float)tex[i]->h / tex[i]->ph;
+	return x;
 }
 
 // tilemap.vert's autotile animation: texture coordinate offset of animated autotiles.
-void tilemapAnimate(const Program *prog, float &u, float &v) {
+void tilemapAnimate(const Xform &x, float &u, float &v) {
 	const float tileW = 32, tileH = 32, autotileW = 3 * tileW, autotileH = 4 * tileW;
 	const int nAutotiles = 7;
-	const float *aniIndex = prog->get("aniIndex");
-	const float *atFrames = prog->get("atFrames");
-	if (!aniIndex || !atFrames) return;
+	if (!x.aniIndex || !x.atFrames) return;
 	if (!(u <= autotileW && v <= autotileH * nAutotiles)) return;
 	int atIndex = std::min(std::max((int)(v / autotileH), 0), nAutotiles - 1);
-	int frames = (int)atFrames[atIndex], ani = (int)aniIndex[0];
+	int frames = (int)x.atFrames[atIndex], ani = (int)x.aniIndex[0];
 	if (frames <= 0) return;
 	int frame = ani % frames;
 	int row = frame / 8, col = frame - 8 * row;
@@ -868,34 +919,22 @@ struct CpuVtx {
 	float u, w;
 };
 
-// Runs the vertex program on the CPU for one vertex. tex: the textures of PICA units 0-2.
-void transformVertex(const Program *prog, const VertexArray &va, size_t vi, bool screen, Tex *const tex[3], CpuVtx &cv) {
-	static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+// Runs the vertex program on the CPU for one vertex (per-draw state in x, see makeXform).
+void transformVertex(const Xform &x, size_t vi, CpuVtx &cv) {
 	Vtx &v = cv.v;
-	const float *proj = prog->get("projMat");
-	if (!proj) proj = identity;
-	const float *translation = prog->get("translation");
-	const float *texSizeInv = prog->get("texSizeInv");
-	const float *model = prog->vert == VertKind::Sprite ? prog->get("spriteMat")
-	                     : prog->vert == VertKind::SimpleMatrix ? prog->get("matrix")
-	                                                            : nullptr;
-	const float *p = (const float *)attribData(va.attribs[0], vi);
-	const float *t = va.attribs[1].enabled ? (const float *)attribData(va.attribs[1], vi) : nullptr;
-	const float *c = va.attribs[2].enabled ? (const float *)attribData(va.attribs[2], vi) : nullptr;
-	float x = p ? p[0] : 0, y = p ? p[1] : 0;
-	if (translation && (prog->vert == VertKind::Simple || prog->vert == VertKind::SimpleColor || prog->vert == VertKind::Tilemap)) {
-		x += translation[0];
-		y += translation[1];
-	}
+	const float *p = x.pos.at(vi);
+	const float *t = x.tc.at(vi);
+	const float *c = x.color.at(vi);
+	float px = (p ? p[0] : 0) + x.tx, py = (p ? p[1] : 0) + x.ty;
 	float clip[4];
-	if (model) {
+	if (x.model) {
 		float s[4];
-		mulMat(model, x, y, s);
-		mulMat4(proj, s, clip);
+		mulMat(x.model, px, py, s);
+		mulMat4(x.proj, s, clip);
 	} else {
-		mulMat(proj, x, y, clip);
+		mulMat(x.proj, px, py, clip);
 	}
-	if (screen) {
+	if (x.screen) {
 		float cx = clip[0];
 		clip[0] = SCREEN_XX * clip[1];
 		clip[1] = SCREEN_YX * cx;
@@ -905,22 +944,20 @@ void transformVertex(const Program *prog, const VertexArray &va, size_t vi, bool
 	v.pos[2] = -0.5f * clip[3]; // PICA clip space: -w <= z <= 0
 	v.pos[3] = clip[3];
 	float u = t ? t[0] : 0, w = t ? t[1] : 0;
-	if (prog->vert == VertKind::Tilemap) tilemapAnimate(prog, u, w);
-	if (texSizeInv) {
-		u *= texSizeInv[0];
-		w *= texSizeInv[1];
+	if (x.tilemap) tilemapAnimate(x, u, w);
+	if (x.texSizeInv) {
+		u *= x.texSizeInv[0];
+		w *= x.texSizeInv[1];
 	}
 	cv.u = u, cv.w = w;
 	// logical [0, 1] texture coordinates -> each unit's padded texture
 	float *tcs[3] = {v.tc, v.tc1, v.tc2};
 	for (int i = 0; i < 3; i++) {
 		float du = u, dv = w;
-		if (i == 1 && prog->frag == FragKind::Blit) {
-			// bitmapBlit.frag: dstCoor = (v_texCoord - subRect.xy) * subRect.zw
-			if (const float *sub = prog->get("subRect")) du = (u - sub[0]) * sub[2], dv = (w - sub[1]) * sub[3];
-		}
-		tcs[i][0] = tex[i] ? du * tex[i]->w / tex[i]->pw : du;
-		tcs[i][1] = tex[i] ? dv * tex[i]->h / tex[i]->ph : dv;
+		// bitmapBlit.frag: dstCoor = (v_texCoord - subRect.xy) * subRect.zw
+		if (i == 1 && x.subRect) du = (u - x.subRect[0]) * x.subRect[2], dv = (w - x.subRect[1]) * x.subRect[3];
+		tcs[i][0] = du * x.scaleU[i];
+		tcs[i][1] = dv * x.scaleV[i];
 	}
 	if (c)
 		memcpy(v.color, c, sizeof v.color);
@@ -1085,7 +1122,20 @@ void draw(GLsizei count, uintptr_t indexOffset, bool clearQuad = false, const fl
 	}
 	count -= count % 3;
 	verts.resize(count);
-	for (GLsizei i = 0; i < count; i++) transformVertex(prog, va, indices[i], screen, tex, verts[i]);
+	rmxp3dsProfileAdd(RP_GLDRAWS, 1);
+	{
+		Rmxp3dsProfileScope prof(RP_GLXFORM);
+		// each distinct vertex once (quads use 4 of every 6 indices), then gathered by index
+		const Xform x = makeXform(prog, va, screen, tex);
+		uint16_t lo = 0xffff, hi = 0;
+		for (GLsizei i = 0; i < count; i++) lo = std::min(lo, indices[i]), hi = std::max(hi, indices[i]);
+		static std::vector<CpuVtx> unique;
+		if (count > 0) {
+			unique.resize((size_t)hi - lo + 1);
+			for (size_t vi = lo; vi <= hi; vi++) transformVertex(x, vi, unique[vi - lo]);
+			for (GLsizei i = 0; i < count; i++) verts[i] = unique[indices[i] - lo];
+		}
+	}
 	static std::vector<CpuVtx> keep;
 	keep.clear();
 	faded.clear();
@@ -1201,6 +1251,7 @@ void APIENTRY blendFuncSeparate(GLenum sr, GLenum dr, GLenum sa, GLenum da) {
 }
 void APIENTRY blendEquation(GLenum e) { st.blendEq = e; }
 void APIENTRY drawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
+	Rmxp3dsProfileScope prof_(RP_GLDRAW); // frame profile (frameprofile.h)
 	if (mode != GL_TRIANGLES || type != GL_UNSIGNED_SHORT) {
 		warnOnce("DrawElements: only GL_TRIANGLES with GL_UNSIGNED_SHORT");
 		return;
@@ -1262,6 +1313,7 @@ void uploadRect(Tex &t, GLint x, GLint y, GLsizei w, GLsizei h, const uint8_t *d
 }
 
 void APIENTRY texImage2D(GLenum, GLint, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum, const GLvoid *data) {
+	Rmxp3dsProfileScope prof_(RP_GLUPLOAD); // frame profile (frameprofile.h)
 	Tex *t = texture(st.boundTex[st.activeUnit]);
 	if (!t) return;
 	// freed when the GPU is done with it; a texture in VRAM gets new linear memory (its content is
@@ -1290,6 +1342,7 @@ void APIENTRY texImage2D(GLenum, GLint, GLint, GLsizei w, GLsizei h, GLint, GLen
 }
 
 void APIENTRY texSubImage2D(GLenum, GLint, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum, const GLvoid *data) {
+	Rmxp3dsProfileScope prof_(RP_GLUPLOAD); // frame profile (frameprofile.h)
 	Tex *t = texture(st.boundTex[st.activeUnit]);
 	if (!t || !t->allocated || !data) return;
 	if (x < 0 || y < 0 || x + w > t->w || y + h > t->h) return;
@@ -1473,6 +1526,20 @@ void APIENTRY deleteVertexArrays(GLsizei n, const GLuint *a) {
 }
 void APIENTRY bindVertexArray(GLuint a) { st.boundVertexArray = a; }
 } // namespace
+
+// Texture memory known to gl3ds (frame profile): allocated textures in linear memory and VRAM
+// (KiB) and their count, plus textures waiting for deferred deletion.
+void gl3dsTextureStats(unsigned *linearKb, unsigned *vramKb, unsigned *count, unsigned *deadKb) {
+	size_t lin = 0, vram = 0, dead = 0;
+	unsigned n = 0;
+	for (auto &kv : st.textures) {
+		if (!kv.second.allocated) continue;
+		++n;
+		(kv.second.inVram ? vram : lin) += kv.second.tex.size;
+	}
+	for (C3D_Tex &t : st.deadTextures) dead += t.size;
+	*linearKb = lin / 1024, *vramKb = vram / 1024, *count = n, *deadKb = dead / 1024;
+}
 
 void gl3dsAptResumed() {
 	if (!aptHeld) return;
