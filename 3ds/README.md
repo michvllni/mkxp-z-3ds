@@ -110,6 +110,10 @@ involved.
     a bitmap with the same box (`fill_rect` then fills only a quarter).
   - `src/display/gl/texpool.h`: the pool of disposed bitmaps keeps 4 MB instead of 20 MB.
   - `src/display/tilemap.cpp`: tile texture insets stay half a texel below 1:1 scaling.
+  - `src/display/font.cpp`: a font with a positive hhea descender (Essentials' "Power Green" and
+    "Power Clear") gets it negated before SDL_ttf computes its metrics. FreeType takes it as is,
+    so `text_size` reported 62.5 % of the line height and Essentials cut every line in half;
+    Windows (RGSS) uses the OS/2 win metrics instead.
   - Hires with a scaling factor below 1, which upstream does not handle:
     - `src/display/graphics.cpp` `ScreenScene`: the scene geometry stays in game coordinates
       (sprite and viewport culling, plane size); the ping-pong buffer size drives the GL

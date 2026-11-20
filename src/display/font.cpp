@@ -592,6 +592,17 @@ MKXPZ_TTF_FONT *SharedFontState::getFont(std::string family,
 	if (font)
 	{
 		FT_Face face = TTF_FONT_TO_FT_FACE(font);
+#ifdef __3DS__
+		/* mkxp-z-3ds: some fonts store a positive descender in their hhea table (Pokémon
+		 * Essentials' "Power Green": +192, while its OS/2 table has -192). FreeType takes it as
+		 * is, so the line height (TTF_FontHeight, Bitmap#text_size) shrinks by twice the
+		 * descender, and games that size text rects with text_size cut off the bottom of every
+		 * line. Windows takes the height from the OS/2 win metrics and never sees it. A
+		 * descender is never above the baseline: flip it before SDL_ttf computes its metrics
+		 * (TTF_SetFontSize below). */
+		if (face->descender > 0)
+			face->descender = -face->descender;
+#endif
 		/* This is should always be true, but we may as well check... */
 		if (FT_IS_SCALABLE( face ))
 		{
