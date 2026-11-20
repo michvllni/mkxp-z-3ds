@@ -163,9 +163,12 @@ involved.
   - Without 3dslink, stderr (Ruby errors, `Debug()` output, `print`/`msgbox` text) goes to
     `sdmc:/rmxp3ds/mkxp-stderr.txt`. The shutdown writes one `exit: <step>` line per step (flushed),
     ending with `exit: clean shutdown` after `C3D_Fini` (`gl3dsShutdown`) and `gfxExit`. When the
-    system closes the app (HOME Menu, power button), a watchdog (`platform/exitwatch.h`) ends the
-    process 8 s later if the shutdown has not finished, and logs the step it was stuck at, so
-    "Closing software" cannot hang.
+    system closes the app (HOME Menu, power button), draws and presents stop at once
+    (`gl3dsCloseRequested`), and `gl3dsShutdown` waits at most 2 s for the GPU before `C3D_Fini`:
+    citro3d's own wait has no time limit and never ended on the console after a HOME close. If
+    the GPU is still busy, citro3d is left as it is (`exit: GPU still busy ...`). As a last resort
+    a watchdog (`platform/exitwatch.h`) ends the process 8 s after the close request and logs the
+    step it was stuck at; the system then reports an error and restarts.
   - Message boxes (`print`, `msgbox`) are printed on the bottom-screen console and do not block. A
     blocking box needs the renderer.
   - When the game ends with an error (initialisation error, uncaught Ruby exception: hook in

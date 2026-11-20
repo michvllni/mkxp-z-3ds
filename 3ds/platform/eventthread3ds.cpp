@@ -68,6 +68,7 @@ void EventThread::process(RGSSThreadData &rtData) {
 	memset(keyStates, 0, sizeof keyStates);
 	while (!rtData.rqTermAck) {
 		bool running = aptMainLoop();
+		if (!running) gl3dsCloseRequested(); // before rendering resumes: no new GPU work
 		gl3dsAptResumed(); // rendering paused for HOME or sleep mode continues
 		if (!running) {
 			rmxp3dsCloseRequested();

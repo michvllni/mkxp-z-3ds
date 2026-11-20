@@ -228,7 +228,7 @@ int main(int argc, char *argv[]) {
 
 	startWatchdog(); // also when the game ended by itself: the teardown below must not hang
 	rmxp3dsExitStep("ending citro3d");
-	gl3dsShutdown();
+	if (!gl3dsShutdown()) rmxp3dsExitStep("GPU still busy after 2 s: citro3d left as it is");
 	rmxp3dsExitStep("gfxExit");
 	if (socBuffer) {
 		socExit();

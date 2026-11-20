@@ -233,6 +233,12 @@ inline size_t tiledOffset(u32 x, u32 y, u32 pw) {
 RecursiveLock gpuLock;
 aptHookCookie aptCookie;
 bool aptHeld = false; // main thread only
+// Set by the main thread when the system asks the app to close (gl3dsCloseRequested): from then on
+// draws, clears and presents submit nothing. libctru gives the GPU back on that wake-up
+// (apt.c aptWaitForWakeUp), but work submitted afterwards could still be running when the system
+// takes it again, and C3D_Fini waits for it without a time limit (rmxp3ds NOTES, kit 4 run).
+volatile bool closing = false;
+const s64 SHUTDOWN_GPU_WAIT_MS = 2000;
 
 struct GpuScope {
 	GpuScope() { RecursiveLock_Lock(&gpuLock); }
@@ -1079,6 +1085,7 @@ void emit(const std::vector<CpuVtx> &verts, C3D_RenderTarget *target, bool scree
 // Draws count indexed vertices (GL_TRIANGLES, uint16 indices at byte offset) with the current
 // program, textures and state; clearQuad draws a quad of quadColor over the whole target.
 void draw(GLsizei count, uintptr_t indexOffset, bool clearQuad = false, const float *quadColor = nullptr) {
+	if (closing) return;
 	bool screen;
 	Tex *targetTex;
 	C3D_RenderTarget *target = currentTarget(&screen, &targetTex); // may end the frame
@@ -1160,7 +1167,7 @@ void APIENTRY clearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a) {
 }
 
 void APIENTRY clear(GLbitfield mask) {
-	if (!(mask & GL_COLOR_BUFFER_BIT)) return;
+	if (closing || !(mask & GL_COLOR_BUFFER_BIT)) return;
 	Tex *t = framebufferTexture();
 	if (t && !t->inVram)
 		cpuClear(*t, st.clearColor); // not a render target yet: keep it in linear memory
@@ -1547,18 +1554,28 @@ void gl3dsAptResumed() {
 	RecursiveLock_Unlock(&gpuLock);
 }
 
-void gl3dsShutdown() {
-	if (!st.c3dReady) return;
+void gl3dsCloseRequested() { closing = true; }
+
+bool gl3dsShutdown() {
+	if (!st.c3dReady) return true;
 	aptUnhook(&aptCookie);
 	if (aptHeld) { // closed while suspended: the RGSS thread has stopped, nothing waits for it
 		aptHeld = false;
 		RecursiveLock_Unlock(&gpuLock);
 	}
-	C3D_Fini(); // waits for and clears the GPU queue, destroys the render targets
+	// C3D_Fini waits for the GX queue without a time limit (citro3d renderqueue.c
+	// C3Di_WaitAndClearQueue(-1) -> libctru gxCmdQueueWait, which loops until the GPU reports
+	// the work done). On the console that wait never ended when closing from the HOME Menu
+	// (rmxp3ds NOTES, kit 4 run): wait a bounded time first (the queue argument is unused), and
+	// leave citro3d as it is if the GPU does not finish; gfxExit and the system clean up then.
 	st.c3dReady = false;
+	if (!gxCmdQueueWait(nullptr, SHUTDOWN_GPU_WAIT_MS * (s64)(SYSCLOCK_ARM11 / 1000))) return false;
+	C3D_Fini(); // the queue is idle: clears it, destroys the render targets
+	return true;
 }
 
 void gl3dsPresent() {
+	if (closing) return;
 	beginFrame(); // a frame with nothing drawn still shows the (cleared) screen
 	C3D_FrameDrawOn(st.top);
 	endFrame(true); // submitted; deferred deletions wait for the GPU (next beginFrame)
