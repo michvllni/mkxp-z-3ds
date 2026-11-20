@@ -173,6 +173,8 @@ involved.
 - **Logs and messages:**
   - Without 3dslink, stderr (Ruby errors, `Debug()` output, `print`/`msgbox` text) goes to
     `sdmc:/rmxp3ds/mkxp-stderr.txt`.
+  - Slow loads are noted there as `slow: <what> <file> <ms> ms` when they take 100 ms or more
+    (`platform/slowlog.h`): bitmap loads from files, BGM/BGS/ME starts, SE decoding.
   - Message boxes (`print`, `msgbox`) are printed on the bottom-screen console and do not block. A
     blocking box needs the renderer.
   - When the game ends with an error (initialisation error, uncaught Ruby exception: hook in

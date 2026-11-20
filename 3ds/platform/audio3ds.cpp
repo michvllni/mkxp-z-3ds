@@ -34,6 +34,7 @@
 #include "exception.h"
 #include "filesystem.h"
 #include "sharedstate.h"
+#include "slowlog.h"
 
 namespace {
 
@@ -606,6 +607,7 @@ struct AudioPrivate {
 	void play(Stream &s, const char *filename, int volume, int pitch, double pos) {
 		std::string name = filename ? filename : "";
 		if (!ready) return checkExists(name);
+		SlowLog slow("audio play", name);
 		float vol = clampVolume(volume), pit = clampPitch(pitch);
 		LightLock_Lock(&lock);
 		if (s.active && !s.fadingOut && name == s.file && pit == s.pitch) {
@@ -697,6 +699,7 @@ struct AudioPrivate {
 	// Decodes a whole SE into linear memory (Ruby thread, outside the lock). nullptr if it
 	// cannot be played or there is no linear memory; throws if the file is missing.
 	SEBuffer *decodeSE(const std::string &name) {
+		SlowLog slow("se decode", name);
 		Decoder *d = openDecoder(name);
 		if (!d) return nullptr;
 		std::vector<int16_t> pcm;

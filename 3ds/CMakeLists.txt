@@ -111,7 +111,8 @@ target_include_directories(mkxp-z PRIVATE
   "${MKXP_ROOT}/src/display/libnsgif/utils" "${MKXP_ROOT}/src/etc" "${MKXP_ROOT}/src/filesystem"
   "${MKXP_ROOT}/src/input" "${MKXP_ROOT}/src/net" "${MKXP_ROOT}/src/system" "${MKXP_ROOT}/src/util"
   "${MKXP_ROOT}/src/util/sigslot" "${MKXP_ROOT}/src/util/sigslot/adapter" "${MKXP_ROOT}/binding"
-  "${CMAKE_CURRENT_SOURCE_DIR}/ruby/shim/include" "${CMAKE_CURRENT_SOURCE_DIR}/display")
+  "${CMAKE_CURRENT_SOURCE_DIR}/ruby/shim/include" "${CMAKE_CURRENT_SOURCE_DIR}/display"
+  "${CMAKE_CURRENT_SOURCE_DIR}/platform")
 target_include_directories(mkxp-z SYSTEM PRIVATE
   "${DEPS3DS_DIR}/include/SDL2" "${DEPS3DS_DIR}/include/uchardet" "${DEPS3DS_DIR}/include/pixman-1"
   ${FREETYPE_INCLUDE_DIRS} ${PHYSFS_INCLUDE_DIRS}

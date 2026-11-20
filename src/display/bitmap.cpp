@@ -30,6 +30,7 @@
 #include <pixman.h>
 
 #ifdef __3DS__
+#include "slowlog.h"
 // mkxp-z-3ds: Hires mode only sets the screen resolution (rmxp3ds D15: the game screen is
 // rendered at 3DS height); bitmaps get no high-res twins.
 #define MKXPZ_HIRES_BITMAPS false
@@ -571,6 +572,9 @@ struct BitmapOpenHandler : FileSystem::OpenHandler
 
 Bitmap::Bitmap(const char *filename)
 {
+#ifdef __3DS__
+    SlowLog slow("bitmap load", filename); // mkxp-z-3ds: finds stalls on the console
+#endif
     std::string hiresPrefix = "Hires/";
     std::string filenameStd = filename;
     Bitmap *hiresBitmap = nullptr;
