@@ -1547,6 +1547,17 @@ void gl3dsAptResumed() {
 	RecursiveLock_Unlock(&gpuLock);
 }
 
+void gl3dsShutdown() {
+	if (!st.c3dReady) return;
+	aptUnhook(&aptCookie);
+	if (aptHeld) { // closed while suspended: the RGSS thread has stopped, nothing waits for it
+		aptHeld = false;
+		RecursiveLock_Unlock(&gpuLock);
+	}
+	C3D_Fini(); // waits for and clears the GPU queue, destroys the render targets
+	st.c3dReady = false;
+}
+
 void gl3dsPresent() {
 	beginFrame(); // a frame with nothing drawn still shows the (cleared) screen
 	C3D_FrameDrawOn(st.top);

@@ -10,6 +10,10 @@ void gl3dsPresent();
 // Called by the main thread after every aptMainLoop(): resumes rendering paused for HOME or sleep
 // mode (gl3ds.cpp, gpuLock).
 void gl3dsAptResumed();
+// Called by the main thread once the RGSS thread has stopped, before gfxExit: waits for the GPU
+// and ends citro3d (C3D_Fini: its GPU command queue, VBlank callbacks and APT hook), so the
+// next app finds the GPU as the system expects. Nothing renders afterwards.
+void gl3dsShutdown();
 // Texture memory known to gl3ds, for the frame profile (KiB, count).
 void gl3dsTextureStats(unsigned *linearKb, unsigned *vramKb, unsigned *count, unsigned *deadKb);
 

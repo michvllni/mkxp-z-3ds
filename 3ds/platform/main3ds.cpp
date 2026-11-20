@@ -186,6 +186,11 @@ int main(int argc, char *argv[]) {
 	// A stuck RGSS thread still uses everything below: end the process without tearing down.
 	if (stuck) svcExitProcess();
 
+	gl3dsShutdown();
+	// The last line in sdmc:/rmxp3ds/mkxp-stderr.txt: the process got this far (also when closed
+	// from the HOME Menu). A missing line means it ended earlier (stuck RGSS thread, crash).
+	fprintf(stderr, "exit: clean shutdown\n");
+	fflush(stderr);
 	if (socBuffer) {
 		socExit();
 		free(socBuffer);
