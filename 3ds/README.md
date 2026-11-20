@@ -100,6 +100,9 @@ involved.
   - `src/input/input.cpp`: `Input::Controller.name` returns "Nintendo 3DS".
   - `src/display/graphics.cpp`: frames end in `gl3dsPresent()` instead of `SDL_GL_SwapWindow`.
   - `src/display/bitmap.cpp`: no high-res bitmap twins in Hires mode (`MKXPZ_HIRES_BITMAPS`).
+  - `src/display/bitmap.cpp` `releaseResources`: a bitmap's texture is released also when
+    `get_pixel`/`set_pixel` made a CPU copy (upstream released only the copy: one texture leaked
+    per bitmap read with `get_pixel`).
   - `src/display/graphics.cpp` `snapToBitmap`: a plain bitmap of the game's size, scaled up from
     the screen buffer (upstream's Hires snapshot relies on bitmap twins).
   - `src/display/gl/glstate.h`: the scissor box is applied again even when unchanged. Upstream
