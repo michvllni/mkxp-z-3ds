@@ -79,10 +79,26 @@ involved.
 | `src/eventthread.cpp` | `platform/eventthread3ds.cpp` | buttons and circle pad as a game controller, APT loop |
 | `src/filesystem/filesystemImpl.cpp` | `platform/filesystemImpl3ds.cpp` | POSIX and `sdmc:/` paths instead of ghc::filesystem |
 | `src/system/systemImpl.cpp` | `platform/systemImpl3ds.cpp` | system language from the console settings |
-| `src/audio/*.cpp` (OpenAL) | `platform/audio3ds.cpp` | silent for now; ndsp later |
+| `src/audio/*.cpp` (OpenAL) | `platform/audio3ds.cpp` | ndsp, see Audio below |
 | `src/net/net.cpp` (cpp-httplib) | `platform/net3ds.cpp` | HTTPLite raises "not available" |
 | `src/display/gl/gl-fun.cpp` | `display/gl3ds.cpp` | the GL function table (see above) |
 
+- **Audio** (`platform/audio3ds.cpp`, ndsp; needs the DSP firmware `sdmc:/3ds/dspfirm.cdc`,
+  without it the game runs silently):
+  - BGM, BGS and ME are streamed (one channel each, 4 wave buffers of 4096 frames) by an audio
+    thread on the New 3DS core 2 (else core 1, else the app core); SE are decoded once into a
+    3 MiB cache in linear memory and play on 8 channels (the oldest gives way).
+  - Formats: Ogg Vorbis (Tremor, `vorbisidec`) and PCM WAV (8/16 bit). MIDI is not played (no
+    synthesizer on the 3DS): the rmxp3ds converter renders it to Ogg Vorbis. Files the runtime
+    cannot play are skipped with one line on stderr; a missing file raises as upstream.
+  - As upstream: the same file and pitch again only changes the volume, pitch 50–150 %, Vorbis
+    `LOOPSTART`/`LOOPLENGTH`, a 1 s fade in when a position is given, the ME pauses the BGM
+    (200 ms fade out, 1 s fade in), `bgm_pos` in seconds. One BGM track (no mkxp-z tracks).
+  - Differs from upstream on purpose: `LOOPSTART=0` with `LOOPLENGTH` loops `0..LOOPLENGTH`
+    (upstream needs both non-zero and otherwise loops the whole file; the rmxp3ds converter
+    writes it for rendered MIDI so the reverb tail stays outside the loop), and `LOOPSTART`
+    alone loops from there to the end of the file.
+  - Not yet: SE decoding runs on the Ruby thread at the first play of a sound (cached after).
 - **Native Essentials map renderer** (`display/tilerenderer.{h,cpp}`, Ruby class
   `RMXP3DSTileRenderer`, rmxp3ds D17): draws Pokémon Essentials v21 maps instead of its Ruby
   `TilemapRenderer`. The rmxp3ds patch `patches/essentials-v21/tilemap_renderer.rb` (preload
