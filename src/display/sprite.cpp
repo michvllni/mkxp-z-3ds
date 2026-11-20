@@ -1000,7 +1000,10 @@ void Sprite::draw()
 
     if (renderEffect)
     {
-        if (scalingMethod != NearestNeighbor)
+        // mkxp-z-3ds: bilinear is a texture filter and works with this shader too (rmxp3ds
+        // converts with bitmapSmoothScalingDown 1: text sprites with opacity or tone stay legible
+        // at the 3DS scale); only the shader-based methods fall back, as upstream.
+        if (scalingMethod != NearestNeighbor && scalingMethod != Bilinear)
         {
             Debug() << "BUG: Smooth SpriteShader not implemented:" << scalingMethod;
             scalingMethod = NearestNeighbor;
@@ -1047,7 +1050,10 @@ void Sprite::draw()
     }
     else if (p->opacity != 255)
     {
-        if (scalingMethod != NearestNeighbor)
+        // mkxp-z-3ds: bilinear is a texture filter and works with this shader too (rmxp3ds
+        // converts with bitmapSmoothScalingDown 1: text sprites with opacity or tone stay legible
+        // at the 3DS scale); only the shader-based methods fall back, as upstream.
+        if (scalingMethod != NearestNeighbor && scalingMethod != Bilinear)
         {
             Debug() << "BUG: Smooth AlphaSpriteShader not implemented:" << scalingMethod;
             scalingMethod = NearestNeighbor;

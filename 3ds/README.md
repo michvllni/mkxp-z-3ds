@@ -110,6 +110,10 @@ involved.
     a bitmap with the same box (`fill_rect` then fills only a quarter).
   - `src/display/gl/texpool.h`: the pool of disposed bitmaps keeps 4 MB instead of 20 MB.
   - `src/display/tilemap.cpp`: tile texture insets stay half a texel below 1:1 scaling.
+  - `src/display/sprite.cpp`: bilinear scaling (`bitmapSmoothScaling[Down]` 1) also applies to
+    sprites with tone, colour, bush or opacity. Upstream falls back to nearest there and logs a
+    "BUG" line per draw, although bilinear is only a texture filter; the shader-based methods
+    still fall back.
   - Hires with a scaling factor below 1, which upstream does not handle:
     - `src/display/graphics.cpp` `ScreenScene`: the scene geometry stays in game coordinates
       (sprite and viewport culling, plane size); the ping-pong buffer size drives the GL
