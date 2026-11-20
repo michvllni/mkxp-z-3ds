@@ -94,6 +94,10 @@ involved.
   - As upstream: the same file and pitch again only changes the volume, pitch 50–150 %, Vorbis
     `LOOPSTART`/`LOOPLENGTH`, a 1 s fade in when a position is given, the ME pauses the BGM
     (200 ms fade out, 1 s fade in), `bgm_pos` in seconds. One BGM track (no mkxp-z tracks).
+  - Differs from upstream on purpose: `LOOPSTART=0` with `LOOPLENGTH` loops `0..LOOPLENGTH`
+    (upstream needs both non-zero and otherwise loops the whole file; the rmxp3ds converter
+    writes it for rendered MIDI so the reverb tail stays outside the loop), and `LOOPSTART`
+    alone loops from there to the end of the file.
   - Not yet: SE decoding runs on the Ruby thread at the first play of a sound (cached after).
 - **Native Essentials map renderer** (`display/tilerenderer.{h,cpp}`, Ruby class
   `RMXP3DSTileRenderer`, rmxp3ds D17): draws Pokémon Essentials v21 maps instead of its Ruby

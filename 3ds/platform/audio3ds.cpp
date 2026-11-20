@@ -9,7 +9,10 @@
 // - Semantics follow upstream src/audio: same file and pitch again only changes the volume,
 //   pitch 50..150 %, fade out over the given milliseconds, a 1 s fade in when a position is
 //   given, the ME pauses the BGM (200 ms fade out, 1 s fade in afterwards), Vorbis
-//   LOOPSTART/LOOPLENGTH comments, bgm_pos in seconds.
+//   LOOPSTART/LOOPLENGTH comments, bgm_pos in seconds. Loop comments differ on purpose:
+//   LOOPSTART=0 with LOOPLENGTH loops 0..LOOPLENGTH (upstream loops the whole file; the
+//   converter writes it for MIDI so the reverb tail stays outside the loop), and LOOPSTART
+//   alone loops from there to the end of the file.
 // - MIDI is not played on the 3DS: rmxp3ds-convert renders it to Ogg Vorbis on the PC. A file
 //   in a format the runtime cannot play is skipped silently (one line on stderr); a missing file
 //   raises like upstream.
@@ -205,6 +208,21 @@ struct DecoderOpener : FileSystem::OpenHandler {
 	}
 };
 
+// Without ndsp: only checks that the file exists (throws like upstream if not); a name is
+// checked once.
+void checkExists(const std::string &filename) {
+	static std::set<std::string> seen;
+	if (seen.count(filename)) return;
+	struct Closer : FileSystem::OpenHandler {
+		bool tryRead(SDL_RWops &ops, const char *) override {
+			SDL_RWclose(&ops);
+			return true;
+		}
+	} closer;
+	shState->fileSystem().openRead(closer, filename.c_str());
+	seen.insert(filename);
+}
+
 // Throws (like upstream) if there is no such file; nullptr if none of them can be played.
 Decoder *openDecoder(const std::string &filename) {
 	DecoderOpener opener;
@@ -246,7 +264,9 @@ struct Stream {
 	bool ended = false;  // decoder exhausted (not looped): finishes when the queue is empty
 	ndspWaveBuf wb[STREAM_BUFS];
 	int16_t *data[STREAM_BUFS] = {};
-	int64_t bufStart[STREAM_BUFS] = {};
+	int64_t bufStart[STREAM_BUFS] = {}; // file frame of each buffer's first sample
+	u64 bufOrder[STREAM_BUFS] = {};     // queue order (oldest first)
+	u64 queued = 0;
 
 	Stream(int ch, bool looped) : ch(ch), looped(looped) {}
 
@@ -308,12 +328,13 @@ struct Stream {
 			if (wb[i].status != NDSP_WBUF_FREE && wb[i].status != NDSP_WBUF_DONE) continue;
 			long got = 0;
 			bool rewound = false;
-			bufStart[i] = dec->tell();
+			bufStart[i] = -1;
 			while (got < STREAM_FRAMES) {
 				long want = STREAM_FRAMES - got;
 				if (looped && dec->loopEnd > 0) want = (long)std::min<int64_t>(want, dec->loopEnd - dec->tell());
 				long n = want > 0 ? dec->read(data[i] + got * dec->channels, want) : 0;
 				if (n > 0) {
+					if (bufStart[i] < 0) bufStart[i] = dec->tell() - n; // after a loop jump: the jump target
 					got += n;
 					rewound = false;
 					continue;
@@ -329,6 +350,7 @@ struct Stream {
 			wb[i].data_vaddr = data[i];
 			wb[i].nsamples = got;
 			wb[i].looping = false;
+			bufOrder[i] = ++queued;
 			DSP_FlushDataCache(data[i], got * dec->channels * sizeof(int16_t));
 			ndspChnWaveBufAdd(ch, &wb[i]);
 		}
@@ -373,11 +395,22 @@ struct Stream {
 		fadeOutStart = osGetTime();
 	}
 
+	// Seconds into the file of the sample playing now: the playing buffer's start plus the DSP's
+	// position in it (else the oldest queued buffer's start), wrapped into the loop.
 	double position() const {
 		if (!active || !dec) return 0;
-		for (int i = 0; i < STREAM_BUFS; ++i)
-			if (wb[i].status == NDSP_WBUF_PLAYING) return (bufStart[i] + ndspChnGetSamplePos(ch)) / dec->rate;
-		return bufStart[0] / dec->rate;
+		int64_t pos = -1;
+		for (int i = 0; i < STREAM_BUFS && pos < 0; ++i)
+			if (wb[i].status == NDSP_WBUF_PLAYING) pos = bufStart[i] + ndspChnGetSamplePos(ch);
+		if (pos < 0) {
+			int oldest = -1;
+			for (int i = 0; i < STREAM_BUFS; ++i)
+				if (wb[i].status == NDSP_WBUF_QUEUED && (oldest < 0 || bufOrder[i] < bufOrder[oldest])) oldest = i;
+			pos = oldest >= 0 ? bufStart[oldest] : dec->tell();
+		}
+		int64_t ls = dec->loopStart > 0 ? dec->loopStart : 0;
+		if (looped && dec->loopEnd > ls && pos >= dec->loopEnd) pos = ls + (pos - ls) % (dec->loopEnd - ls);
+		return std::max<int64_t>(0, pos) / dec->rate;
 	}
 };
 
@@ -525,13 +558,23 @@ struct AudioPrivate {
 				if (bgm.active && bgm.paused) {
 					bgm.paused = false;
 					ndspChnSetPaused(bgm.ch, false);
+					meState = BgmFadingIn;
+				} else {
+					// No BGM was held: as upstream, full volume at once.
+					bgm.duck = 1;
+					bgm.applyVolume();
+					meState = MeNotPlaying;
 				}
-				meState = BgmFadingIn;
 			}
 			break;
 		case BgmFadingIn:
 			if (me.active) {
 				meState = BgmFadingOut;
+				break;
+			}
+			if (!bgm.active) { // stopped meanwhile: as upstream, no fade for the next one
+				bgm.duck = 1;
+				meState = MeNotPlaying;
 				break;
 			}
 			bgm.duck += dt / FADE_IN_MS;
@@ -550,8 +593,8 @@ struct AudioPrivate {
 
 	// Upstream AudioStream::play: the same file and pitch again only changes the volume.
 	void play(Stream &s, const char *filename, int volume, int pitch, double pos) {
-		if (!ready) return;
 		std::string name = filename ? filename : "";
+		if (!ready) return checkExists(name);
 		float vol = clampVolume(volume), pit = clampPitch(pitch);
 		LightLock_Lock(&lock);
 		if (s.active && !s.fadingOut && name == s.file && pit == s.pitch) {
@@ -597,15 +640,24 @@ struct AudioPrivate {
 
 	// --- SE ---
 
+	// Busy: its wave buffer is queued or playing. The status is set at once by
+	// ndspChnWaveBufAdd; ndspChnIsPlaying only follows the DSP's state once per DSP frame, so two
+	// SE in the same Ruby frame would share a channel and a queued one could be evicted.
+	bool seBusy(int k) const {
+		return seWb[k].status == NDSP_WBUF_QUEUED || seWb[k].status == NDSP_WBUF_PLAYING ||
+		       ndspChnIsPlaying(CH_SE + k);
+	}
+
 	bool seInUse(SEBuffer *b) {
 		for (int i = 0; i < SE_CHANNELS; ++i)
-			if (seOn[i] == b && ndspChnIsPlaying(CH_SE + i)) return true;
+			if (seOn[i] == b && seBusy(i)) return true;
 		return false;
 	}
 
 	void seStopLocked() {
 		for (int i = 0; i < SE_CHANNELS; ++i) {
 			ndspChnWaveBufClear(CH_SE + i);
+			seWb[i].status = NDSP_WBUF_FREE; // detached: not busy any more (seBusy)
 			seOn[i] = nullptr;
 		}
 	}
@@ -679,8 +731,8 @@ struct AudioPrivate {
 	// Upstream SoundEmitter::play: a free channel, else one that plays the same sound, else
 	// the one started longest ago.
 	void sePlay(const char *filename, int volume, int pitch) {
-		if (!ready) return;
 		std::string name = filename ? filename : "";
+		if (!ready) return checkExists(name);
 		float vol = clampVolume(volume), pit = clampPitch(pitch);
 		LightLock_Lock(&lock);
 		SEBuffer *buf = seFind(name);
@@ -703,7 +755,7 @@ struct AudioPrivate {
 		LightLock_Lock(&lock);
 		int k = -1;
 		for (int i = 0; i < SE_CHANNELS && k < 0; ++i)
-			if (!ndspChnIsPlaying(CH_SE + i)) k = i;
+			if (!seBusy(i)) k = i;
 		for (int i = 0; i < SE_CHANNELS && k < 0; ++i)
 			if (seOn[i] == buf) k = i;
 		if (k < 0) {
