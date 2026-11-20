@@ -261,6 +261,7 @@ struct Stream {
 	bool fadingOut = false, fadingIn = false;
 	bool active = false; // started and not yet finished or stopped
 	bool paused = false; // by the ME watch
+	bool deferred = false; // started while an ME played: plays at full volume when it ends
 	bool ended = false;  // decoder exhausted (not looped): finishes when the queue is empty
 	ndspWaveBuf wb[STREAM_BUFS];
 	int16_t *data[STREAM_BUFS] = {};
@@ -291,7 +292,7 @@ struct Stream {
 		ndspChnWaveBufClear(ch);
 		delete dec;
 		dec = nullptr;
-		active = paused = ended = fadingOut = fadingIn = false;
+		active = paused = ended = fadingOut = fadingIn = deferred = false;
 		fadeOut = fadeIn = 1;
 		file.clear();
 	}
@@ -339,7 +340,10 @@ struct Stream {
 					rewound = false;
 					continue;
 				}
-				// End of the file, of the loop, or an error: loop back or finish.
+				// End of the file, of the loop, or an error: loop back or finish. The end of the file
+				// becomes the loop end if none (or one past it) was given, so bgm_pos wraps there.
+				if (n == 0 && want > 0 && looped && !rewound && (dec->loopEnd <= 0 || dec->loopEnd > dec->tell()))
+					dec->loopEnd = dec->tell();
 				if (n < 0 || !looped || rewound || !dec->seek(dec->loopStart > 0 ? dec->loopStart : 0)) {
 					ended = true;
 					break;
@@ -555,7 +559,14 @@ struct AudioPrivate {
 			break;
 		case MePlaying:
 			if (!me.active) {
-				if (bgm.active && bgm.paused) {
+				if (bgm.active && bgm.paused && bgm.deferred) {
+					// Started during the ME: as upstream (extPaused), full volume at once.
+					bgm.paused = bgm.deferred = false;
+					ndspChnSetPaused(bgm.ch, false);
+					bgm.duck = 1;
+					bgm.applyVolume();
+					meState = MeNotPlaying;
+				} else if (bgm.active && bgm.paused) {
 					bgm.paused = false;
 					ndspChnSetPaused(bgm.ch, false);
 					meState = BgmFadingIn;
@@ -608,8 +619,11 @@ struct AudioPrivate {
 		LightLock_Lock(&lock);
 		if (d) {
 			bool held = &s == &bgm && (meState == BgmFadingOut || meState == MePlaying);
-			if (&s == &bgm) bgm.duck = held ? 0 : bgm.duck;
 			s.start(d, name, vol, pit, pos, held);
+			if (held) {
+				bgm.duck = 0;
+				bgm.deferred = true;
+			}
 		} else {
 			s.stop();
 		}
