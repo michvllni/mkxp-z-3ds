@@ -131,7 +131,7 @@ target_link_libraries(mkxp-z PRIVATE
   "${RUBY3DS_DIR}/shim/librb3dsshim.a"
   "${DEPS3DS_DIR}/lib/libSDL2_ttf.a" "${DEPS3DS_DIR}/lib/libSDL2_image.a" "${DEPS3DS_DIR}/lib/libSDL2.a"
   "${DEPS3DS_DIR}/lib/libuchardet.a" "${DEPS3DS_DIR}/lib/libpixman-1.a"
-  ${PHYSFS_STATIC_LDFLAGS} png16 jpeg ${FREETYPE_STATIC_LDFLAGS} iconv z m citro3d
+  ${PHYSFS_STATIC_LDFLAGS} png16 jpeg ${FREETYPE_STATIC_LDFLAGS} iconv z m citro3d vorbisidec ogg
   -Wl,--end-group)
 
 ctr_generate_smdh(mkxp-z.smdh
